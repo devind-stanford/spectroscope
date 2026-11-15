@@ -176,12 +176,24 @@
         <select id="autoSource">
           <option value="lamp">Fluorescent lamp</option>
           <option value="sun">Sunlight or blue sky</option>
+          <option value="colour">Any white light, from its colours (rough)</option>
         </select>
+      </div>
+      <div id="colourBox" hidden>
+        <div class="row field" id="colourWbRow">
+          <label for="colourWb">White balance</label>
+          <select id="colourWb"><option value="d65">Daylight, 6500 K</option></select>
+        </div>
+        <p class="note" id="colourNote"></p>
+        <div class="row buttons">
+          <button type="button" class="btn" id="btnKeepColours">Keep these colours</button>
+          <button type="button" class="btn danger" id="btnForgetColours" hidden>Forget kept colours</button>
+        </div>
       </div>
       <div class="row buttons">
         <button type="button" class="btn primary" id="btnAuto">Auto-calibrate</button>
       </div>
-      <p class="note" id="autoStatus">Point the spectroscope at the light and put the band on the whole spectrum, violet to red. Auto-calibrate then finds the known lines and lists them below, where they can be checked, removed or added to.</p>
+      <p class="note" id="autoStatus">Point the spectroscope at the light and put the band on the whole spectrum, violet to red. Auto-calibrate then finds the known lines (or, for any white light, the places where blue turns green and green turns red) and lists them below, where they can be checked, removed or added to.</p>
       <h2>By hand</h2>
       <ol class="steps">
         <li>Tap the plot on a line you recognise. Use the arrows under the plot for single pixels.</li>

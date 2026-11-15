@@ -19,9 +19,10 @@ const DEFAULTS = {
   linearise: true, subtractBg: false, normalise: true, labelPeaks: false,
   gWeight: 1, average: 4, resolution: '1080',
   showSum: true, showR: true, showG: true, showB: true,
-  snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp',
+  snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp', colourWb: 'd65',
   follow: true, bigOnStart: true, keepFixed: true,
 };
+const AUTO_SOURCES = ['lamp', 'sun', 'colour'];
 const FIND_EVERY_MS = 500;     // how often the live view looks for the spectrum when following it
 const NOTICE_MS = 6000;        // how long warnings stay on the picture after a capture
 
@@ -32,7 +33,7 @@ const els = {};
   'btnRotate', 'btnFlip', 'tilt', 'tiltOut', 'camControls', 'camNone',
   'bandPos', 'bandPosOut', 'bandH', 'bandHOut', 'x0', 'x0Out', 'x1', 'x1Out',
   'linearise', 'subtractBg', 'normalise', 'labelPeaks', 'gWeight',
-  'fitSummary', 'autoSource', 'btnAuto', 'autoStatus', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
+  'fitSummary', 'autoSource', 'btnAuto', 'autoStatus', 'colourBox', 'colourWbRow', 'colourWb', 'colourNote', 'btnKeepColours', 'btnForgetColours', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
@@ -59,6 +60,7 @@ const P3_OK = (() => {
 const state = {
   settings: { ...DEFAULTS },
   cals: {},            // saved calibration points, one entry per camera + frame size + orientation
+  colourRefs: {},      // each camera's own colours, kept from a calibrated capture (see colourKey)
   myLines: [],         // wavelengths the user chose to keep in the Known line list: [{ nm }]
   kind: null,          // 'live' or 'photo'
   frozen: false,
@@ -86,6 +88,7 @@ function loadStore() {
     const d = JSON.parse(raw);
     if (d && d.settings) state.settings = { ...DEFAULTS, ...d.settings };
     if (d && d.cals) state.cals = d.cals;
+    if (d && d.colourRefs && typeof d.colourRefs === 'object') state.colourRefs = d.colourRefs;
     if (d && Array.isArray(d.lines)) {
       state.myLines = d.lines.map((l) => ({ nm: Number(l && l.nm) })).filter((l) => l.nm >= 200 && l.nm <= 1200);
     }
@@ -96,7 +99,7 @@ let saveTimer = 0;
 function saveStore() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ settings: state.settings, cals: state.cals, lines: state.myLines })); }
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ settings: state.settings, cals: state.cals, colourRefs: state.colourRefs, lines: state.myLines })); }
     catch (e) { logError('storage', e); }
   }, 250);
 }
@@ -391,9 +394,9 @@ function backgroundStrips(q, now, force) {
 }
 
 /** One measurement of the current frame: column averages inside the band, less stray light. */
-function measure(now, force) {
+function measure(now, force, lutOverride) {
   const q = bandRect(), ctx = state.fc.ctx, s = state.settings;
-  const lut = s.linearise ? LUT_LIN : LUT_RAW;
+  const lut = lutOverride || (s.linearise ? LUT_LIN : LUT_RAW);
   const m = core.columnMeans(ctx.getImageData(q.xa, q.y0, q.n, q.hRows).data, q.n, q.hRows, lut);
   let strips = [];
   if (s.subtractBg) {
@@ -569,7 +572,7 @@ async function startCamera(deviceId, explicit) {
 /** Show the warnings over the picture for a few seconds (after a capture or a photo). */
 function flashNotices() {
   state.noticesUntil = performance.now() + NOTICE_MS;
-  state.noticeKey = '';
+  state.noticeKey = null;   // never equal to a real key, so the list is rebuilt (or emptied) on the next render
   clearTimeout(state.noticeTimer);
   state.noticeTimer = setTimeout(requestRender, NOTICE_MS + 50);
 }
@@ -790,7 +793,7 @@ function renderCalibration() {
     span.textContent = `${p.nm.toFixed(1)} nm at pixel ${(p.off + state.W / 2).toFixed(1)}`;
     if (p.src) {
       const tag = document.createElement('small');
-      tag.textContent = p.src === 'sun' ? '  from sunlight' : '  from lamp';
+      tag.textContent = p.src === 'sun' ? '  from sunlight' : p.src === 'colour' ? '  from colours' : '  from lamp';
       span.appendChild(tag);
     }
     if (cal.ok && cal.n > cal.degree + 1) {
@@ -822,6 +825,7 @@ function renderCalibration() {
   els.btnClearPoints.disabled = !state.points.length;
   els.calStatus.textContent = cal.ok ? 'Calibrated' : 'Not calibrated';
   els.calStatus.classList.toggle('good', cal.ok);
+  updateColourBox();
 }
 
 function readNm() {
@@ -841,13 +845,73 @@ function addPoint() {
   refit();
 }
 
-const AUTO_NAMES = { lamp: 'the lamp', sun: 'sunlight' };
+const AUTO_NAMES = { lamp: 'the lamp', sun: 'sunlight', colour: 'colours' };
+
+/** Which camera a kept colour reference belongs to. Photos go through other colour processing
+ *  than the live camera, so they have their own. */
+function colourKey() {
+  const cam = state.kind === 'live' ? (state.trackLabel || 'camera') : 'photo';
+  return `${cam}|${state.p3 ? 'p3' : 'srgb'}`;
+}
+
+function keptColours() {
+  const k = state.colourRefs[colourKey()];
+  return k && Array.isArray(k.r) && Array.isArray(k.trust) ? k : null;
+}
+
+/** The profile in linear units, as colour calibration needs, even when the sRGB curve is left on. */
+function linearProfile() {
+  const p = state.profile;
+  if (!p || state.settings.linearise || !state.fc) return p;
+  const m = measure(performance.now(), true, LUT_LIN);
+  return { ...p, r: m.r, g: m.g, b: m.b, clip: m.clip };
+}
+
+function colourReference() {
+  return keptColours() || core.colourModel({ white: state.settings.colourWb, space: state.p3 ? 'p3' : 'srgb' });
+}
+
+function dateText(iso) {
+  const d = new Date(iso);
+  return Number.isFinite(d.getTime()) ? d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' }) : 'earlier';
+}
+
+/** Show the colour options when calibrating from colours, and say which colours will be used. */
+function updateColourBox() {
+  const on = els.autoSource.value === 'colour';
+  els.colourBox.hidden = !on;
+  if (!on) return;
+  const kept = keptColours();
+  const FROM = { sun: 'a sunlight calibration', lamp: 'a lamp calibration', hand: 'marked lines' };
+  els.colourWbRow.hidden = !!kept;
+  els.btnForgetColours.hidden = !kept;
+  els.colourNote.textContent = kept
+    ? `Uses this camera's own colours, kept on ${dateText(kept.savedAt)} from ${FROM[kept.from] || 'a calibrated capture'}. Expect errors of a few nm while the white balance stays about the same.`
+    : 'Uses the colours a standard camera gives each wavelength, with the white balance chosen here. Expect errors of about 10 nm. For a better result, calibrate once with a lamp, sunlight or a laser, then point at a white light and tap Keep these colours.';
+  els.btnKeepColours.disabled = !calOk() || !!(state.autoInfo && state.autoInfo.source === 'colour');
+}
+
+/** Keep the colours of the white light in view, under the current (non-colour) calibration. */
+function keepColours(quiet) {
+  const p = linearProfile();
+  if (!p || !calOk()) { if (!quiet) toast('Calibrate first, with a lamp, sunlight or marked lines.'); return false; }
+  if (state.autoInfo && state.autoInfo.source === 'colour') { if (!quiet) toast('This calibration came from colours itself. Calibrate with a lamp, sunlight or marked lines first.'); return false; }
+  const from = state.autoInfo ? state.autoInfo.source : 'hand';
+  const res = core.colourReferenceFrom(p, (i) => pxToNm(p.x0 + i), { savedAt: new Date().toISOString(), from });
+  if (!res.ok) { if (!quiet) toast(res.message, 6000); return false; }
+  state.colourRefs[colourKey()] = res.ref;
+  saveStore();
+  updateColourBox();
+  if (!quiet) toast(`Kept these colours: blue turns green at ${res.crossings[0].toFixed(1)} nm, green turns red at ${res.crossings[1].toFixed(1)} nm.`, 6000);
+  return true;
+}
 
 /** Calibrate from a known light: finds the lines, replaces the marked list, shows lines to compare. */
 function runAuto() {
-  const p = state.profile;
-  if (!p) { toast('Start the camera or load a photo first.'); return; }
-  const src = els.autoSource.value === 'sun' ? 'sun' : 'lamp';
+  const src0 = state.profile;
+  if (!src0) { toast('Start the camera or load a photo first.'); return; }
+  const src = AUTO_SOURCES.includes(els.autoSource.value) ? els.autoSource.value : 'lamp';
+  const p = src === 'colour' ? linearProfile() : src0;
   const say = (text) => { els.autoStatus.textContent = text; };
   // a mirrored spectrum is recognised from its colours: red on the left
   if (p.peakRaw >= 20 && core.redBlueTrend(p.r, p.b) < -0.3) {
@@ -858,9 +922,10 @@ function runAuto() {
   els.btnAuto.disabled = true;
   say('Working…');
   setTimeout(() => {   // let the button and the text update before the search runs
-    let res;
+    let res, ref = null;
     try {
-      res = src === 'sun' ? core.autoCalibrateSun(p.sum, p.x0, state.W, SOLAR) : core.autoCalibrateLamp(p.sum, p.x0, state.W);
+      if (src === 'colour') { ref = colourReference(); res = core.autoCalibrateColour(p, p.x0, state.W, ref); }
+      else res = src === 'sun' ? core.autoCalibrateSun(p.sum, p.x0, state.W, SOLAR) : core.autoCalibrateLamp(p.sum, p.x0, state.W);
     } catch (e) {
       logError('auto-calibrate', e);
       res = { ok: false, message: 'Auto-calibration failed with an error. See More, Diagnostics.', warnings: [] };
@@ -873,12 +938,22 @@ function runAuto() {
     }
     state.points = res.points.map((q) => ({ off: q.off, nm: q.nm, src: q.src }));
     state.autoInfo = { source: src, match: res.r === undefined ? null : Math.round(res.r * 1000) / 1000, lines: res.points.length, at: new Date().toISOString() };
+    if (src === 'colour') {
+      state.autoInfo.colour_mismatch = Math.round(res.mismatch * 1000) / 1000;
+      state.autoInfo.colours = ref.kind === 'model' ? `standard camera model, white balance ${ref.white}, ${ref.space}` : `kept ${ref.savedAt || ''} from ${ref.from || 'a calibrated capture'}`;
+    }
     refit();
-    say([res.message, ...res.warnings].join(' '));
-    els.refLines.value = src === 'sun' ? 'sun' : 'fluor';
-    setSetting('refLines', els.refLines.value);
-    els.snap.value = src === 'sun' ? 'dip' : 'peak';
-    setSetting('snap', els.snap.value);
+    const extra = [];
+    // sunlight is a white light with a known calibration: keep its colours for later, if none are kept yet
+    if (src === 'sun' && !keptColours() && keepColours(true)) extra.push('Its colours were also kept, for calibrating from colours later.');
+    say([res.message, ...res.warnings, ...extra].join(' '));
+    if (src !== 'colour') {
+      els.refLines.value = src === 'sun' ? 'sun' : 'fluor';
+      setSetting('refLines', els.refLines.value);
+      els.snap.value = src === 'sun' ? 'dip' : 'peak';
+      setSetting('snap', els.snap.value);
+    }
+    updateColourBox();
     toast(`Calibrated from ${AUTO_NAMES[src]}.`);
   }, 30);
 }
@@ -1227,7 +1302,9 @@ function syncControls() {
   els.resolution.value = String(s.resolution);
   els.snap.value = s.snap;
   els.refLines.value = s.refLines;
-  els.autoSource.value = s.autoSource === 'sun' ? 'sun' : 'lamp';
+  els.autoSource.value = AUTO_SOURCES.includes(s.autoSource) ? s.autoSource : 'lamp';
+  els.colourWb.value = core.WHITE_BALANCES.some((w) => w.id === s.colourWb) ? s.colourWb : 'd65';
+  updateColourBox();
   for (const id of ['follow', 'bigOnStart', 'keepFixed']) els[id].checked = !!s[id];
   els.name.value = s.name;
   document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(!!s[c.dataset.series])));
@@ -1420,7 +1497,16 @@ function wire() {
   els.btnKeepLine.addEventListener('click', keepOrForgetLine);
   els.btnAddPoint.addEventListener('click', addPoint);
   els.btnAuto.addEventListener('click', runAuto);
-  els.autoSource.addEventListener('change', () => setSetting('autoSource', els.autoSource.value));
+  els.autoSource.addEventListener('change', () => { setSetting('autoSource', els.autoSource.value); updateColourBox(); });
+  els.colourWb.textContent = '';
+  for (const w of core.WHITE_BALANCES) { const o = document.createElement('option'); o.value = w.id; o.textContent = w.name; els.colourWb.appendChild(o); }
+  els.colourWb.addEventListener('change', () => setSetting('colourWb', els.colourWb.value));
+  els.btnKeepColours.addEventListener('click', () => keepColours(false));
+  els.btnForgetColours.addEventListener('click', () => {
+    if (!window.confirm('Forget the colours kept for this camera? Calibrating from colours then uses the standard camera model.')) return;
+    delete state.colourRefs[colourKey()];
+    saveStore(); updateColourBox();
+  });
   els.btnShift.addEventListener('click', shiftToMatch);
   els.btnClearPoints.addEventListener('click', () => {
     if (state.points.length && window.confirm('Remove every marked line for this camera and orientation?')) { state.points = []; refit(); }
@@ -1443,9 +1529,9 @@ function wire() {
     requestRender();
   });
   els.btnResetCals.addEventListener('click', () => {
-    if (!window.confirm('Delete every saved calibration on this device?')) return;
-    state.cals = {}; state.points = [];
-    refit();
+    if (!window.confirm('Delete every saved calibration and kept colours on this device?')) return;
+    state.cals = {}; state.points = []; state.colourRefs = {};
+    refit(); updateColourBox();
   });
 
   document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => selectTab(b.dataset.tab)));
@@ -1614,6 +1700,7 @@ function diagnostics() {
     band_finder: state.findState,
     settings: state.settings,
     calibrations_saved: Object.keys(state.cals),
+    colours_kept: Object.fromEntries(Object.entries(state.colourRefs).map(([k, v]) => [k, `${v.savedAt || '?'} from ${v.from || '?'}`])),
     errors: state.errors,
   }, null, 1);
 }

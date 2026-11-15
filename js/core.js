@@ -9,7 +9,7 @@
 //   - Polynomial coefficients are stored highest power first:
 //     wavelength_nm = c[0] * offset^2 + c[1] * offset + c[2]   (or c[0] * offset + c[1]).
 
-export const VERSION = '0.3.0';
+export const VERSION = '0.4.0';
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -873,4 +873,220 @@ export function autoCalibrateSun(y, x0, W, solar) {
     ok: true, reversed: false, warnings, points, r, fwhm: fit.fwhm, lines: points.length, debug: { ...debug, found },
     message: `Matched the sunlight pattern (match ${r.toFixed(2)} out of 1) and found ${points.length} dark lines between ${lo.toFixed(0)} and ${hi.toFixed(0)} nm.`,
   };
+}
+
+// ---------------------------------------------------------------- calibration from colours
+//
+// Each column of a spectrum is nearly one wavelength, so its colour, the shares R : G : B, depends
+// on the wavelength and on the camera, not on the light. With the camera's white balance held
+// fixed, the colours therefore give the wavelength: blue hands over to green near 490 nm and green
+// to red near 570 nm. The shares a camera gives each wavelength come either from a standard model
+// (what an ideal colour camera reports) or from this camera's own colours, kept from a capture
+// that was calibrated another way. This is the method of the desktop app's Auto-Calibrate, which
+// used a reference capture taken with the white balance locked at 5000 K.
+
+/** CIE 1931 2-degree colour matching functions at wavelength l (nm), from the multi-lobe fit of
+ *  Wyman, Sloan and Shirley (J. Computer Graphics Techniques 2(2), 2013): within about 1 % of the
+ *  tabulated functions. */
+function cieXyz(l) {
+  const g = (mu, s1, s2) => { const t = (l - mu) / (l < mu ? s1 : s2); return Math.exp(-0.5 * t * t); };
+  return [
+    1.056 * g(599.8, 37.9, 31.0) + 0.362 * g(442.0, 16.0, 26.7) - 0.065 * g(501.1, 20.4, 26.2),
+    0.821 * g(568.8, 46.9, 40.5) + 0.286 * g(530.9, 16.3, 31.1),
+    1.217 * g(437.0, 11.8, 36.0) + 0.681 * g(459.0, 26.0, 13.8),
+  ];
+}
+
+/** CIE XYZ to linear RGB, D65 white: sRGB (camera video, most photos) and Display P3 (iPhone photos). */
+const XYZ_TO_RGB = {
+  srgb: [[3.2404542, -1.5371385, -0.4985314], [-0.9692660, 1.8760108, 0.0415560], [0.0556434, -0.2040259, 1.0572252]],
+  p3: [[2.4934969, -0.9313836, -0.4027108], [-0.8294890, 1.7626641, 0.0236247], [0.0358458, -0.0761724, 0.9568845]],
+};
+
+/** White balances the standard model can assume: the light that the camera shows as white. */
+export const WHITE_BALANCES = [
+  { id: 'd65', name: 'Daylight, 6500 K', short: 'daylight (6500 K)', kelvin: 0 },
+  { id: '5000', name: '5000 K, as the desktop app', short: '5000 K', kelvin: 5000 },
+  { id: '4000', name: '4000 K, neutral white lamp', short: '4000 K', kelvin: 4000 },
+  { id: '3000', name: '3000 K, warm white lamp', short: '3000 K', kelvin: 3000 },
+];
+
+function whiteXyz(kelvin) {
+  if (!kelvin) return [0.95047, 1, 1.08883];   // D65
+  let X = 0, Y = 0, Z = 0;
+  for (let l = 360; l <= 830; l++) {
+    const m = l * 1e-9, p = 1 / (m ** 5 * (Math.exp(1.4388e-2 / (m * kelvin)) - 1));
+    const v = cieXyz(l);
+    X += v[0] * p; Y += v[1] * p; Z += v[2] * p;
+  }
+  return [X / Y, 1, Z / Y];
+}
+
+/** The colour shares a standard camera reports for each wavelength: CIE colour matching functions,
+ *  blurred by the slit image, turned into linear RGB and white-balanced so that the chosen white
+ *  light gives R = G = B. Spectral colours lie outside the RGB range, so one channel comes out
+ *  negative; the camera clips it to zero, and so does this model. Returns shares on a 1 nm grid. */
+export function colourModel({ white = 'd65', space = 'srgb', fwhm = 6 } = {}) {
+  const wb = WHITE_BALANCES.find((w) => w.id === String(white)) || WHITE_BALANCES[0];
+  const M = XYZ_TO_RGB[space === 'p3' ? 'p3' : 'srgb'];
+  const start = 360, n = 441;
+  const X = new Float64Array(n), Y = new Float64Array(n), Z = new Float64Array(n);
+  for (let i = 0; i < n; i++) { const v = cieXyz(start + i); X[i] = v[0]; Y[i] = v[1]; Z[i] = v[2]; }
+  const sig = fwhm / 2.355;
+  const Xb = gaussianSmooth(X, sig), Yb = gaussianSmooth(Y, sig), Zb = gaussianSmooth(Z, sig);
+  const wx = whiteXyz(wb.kelvin);
+  const wrgb = M.map((row) => row[0] * wx[0] + row[1] * wx[1] + row[2] * wx[2]);
+  const r = new Float64Array(n), g = new Float64Array(n), b = new Float64Array(n), trust = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const c = M.map((row, k) => Math.max(0, row[0] * Xb[i] + row[1] * Yb[i] + row[2] * Zb[i]) / wrgb[k]);
+    const t = c[0] + c[1] + c[2];
+    if (t > 0) { r[i] = c[0] / t; g[i] = c[1] / t; b[i] = c[2] / t; }
+    const l = start + i;
+    trust[i] = l >= 400 && l <= 680 ? 1 : 0;   // beyond about 680 nm the fitted functions' tails are too rough
+  }
+  return { start, step: 1, r, g, b, trust, kind: 'model', white: wb.id, space: space === 'p3' ? 'p3' : 'srgb', name: `a standard camera with ${wb.short} white balance` };
+}
+
+/** Sample position where share a hands over to share b (a drops below b) in the well-lit part.
+ *  Of several, the one where the two carry the most light (the desktop app's rule: a blip of red
+ *  in the violet is not the green-to-red hand-over). */
+function shareCrossing(a, b, w, from = 0) {
+  let best = null;
+  for (let i = Math.max(0, Math.floor(from)); i < a.length - 1; i++) {
+    const d0 = a[i] - b[i], d1 = a[i + 1] - b[i + 1];
+    if (!(d0 > 0 && d1 <= 0)) continue;
+    const pair = a[i] + b[i];
+    if (pair < 0.6 || !(w[i] >= 0.3)) continue;
+    if (!best || pair > best.pair) best = { pos: i + d0 / (d0 - d1), pair };
+  }
+  return best ? best.pos : null;
+}
+
+/** Shares and weights of a measured profile: smoothed by 2 samples, weight 0 below 5 % of the
+ *  peak and in clipped columns (clipping changes the colour), 1 above 15 %. */
+function profileShares(rgb, ramp = 0.1) {
+  const n = rgb.r.length;
+  const rs = gaussianSmooth(rgb.r, 2), gs = gaussianSmooth(rgb.g, 2), bs = gaussianSmooth(rgb.b, 2);
+  let top = 0;
+  for (let i = 0; i < n; i++) top = Math.max(top, rs[i] + gs[i] + bs[i]);
+  const fr = new Float64Array(n), fg = new Float64Array(n), fb = new Float64Array(n), w = new Float64Array(n);
+  if (!(top > 0)) return { fr, fg, fb, w, top: 0 };
+  for (let i = 0; i < n; i++) {
+    const t = rs[i] + gs[i] + bs[i];
+    if (t > 0) { fr[i] = rs[i] / t; fg[i] = gs[i] / t; fb[i] = bs[i] / t; }
+    w[i] = clamp((t / top - 0.05) / ramp, 0, 1) * (rgb.clip && rgb.clip[i] > 0.01 ? 0 : 1);
+  }
+  return { fr, fg, fb, w, top };
+}
+
+/** Does the light reach blue, green and red, and in that order? */
+function colourCheck(fr, fg, fb, w) {
+  const lead = (f) => { let m = 0; for (let i = 0; i < f.length; i++) if (w[i] >= 0.3 && f[i] > m) m = f[i]; return m; };
+  const missing = [['blue', lead(fb)], ['green', lead(fg)], ['red', lead(fr)]].filter(([, v]) => v < 0.6).map(([k]) => k);
+  let cb = 0, sb = 0, cr = 0, sr = 0;
+  for (let i = 0; i < fr.length; i++) { cb += i * fb[i] * w[i]; sb += fb[i] * w[i]; cr += i * fr[i] * w[i]; sr += fr[i] * w[i]; }
+  return { missing, reversed: sb > 0 && sr > 0 && cb / sb > cr / sr };
+}
+
+function refCrossings(ref) {
+  const bg = shareCrossing(ref.b, ref.g, ref.trust);
+  const gr = bg === null ? null : shareCrossing(ref.g, ref.r, ref.trust, Math.ceil(bg));
+  if (bg === null || gr === null) return null;
+  return [ref.start + bg * ref.step, ref.start + gr * ref.step];
+}
+
+const COLOUR_WINDOW = [450, 630];   // nm compared when refining: where colours change the most
+
+/** Calibrate from the colours of any light that has blue, green and red (a white LED, a torch, a
+ *  bulb, daylight). rgb: { r, g, b, clip } per column, linear (sRGB curve undone). ref: from
+ *  colourModel() or colourReferenceFrom(). The blue-green and green-red hand-overs give a first
+ *  straight-line scale; it is then refined by matching the shares over 450-630 nm. */
+export function autoCalibrateColour(rgb, x0, W, ref) {
+  const fail = (message, extra = {}) => ({ ok: false, points: [], message, warnings: [], reversed: false, ...extra });
+  const n = rgb.r.length;
+  const { fr, fg, fb, w, top } = profileShares(rgb);
+  if (!(top > 0)) return fail('There is no spectrum in the band.');
+  let first = -1, last = -1;
+  for (let i = 0; i < n; i++) if (w[i] >= 0.5) { if (first < 0) first = i; last = i; }
+  if (first < 0 || last - first < 40) return fail('The lit part of the spectrum is too short. Widen the band to cover the whole spectrum.');
+  const chk = colourCheck(fr, fg, fb, w);
+  if (chk.missing.length) {
+    return fail(`The light shows no clear ${chk.missing.join(' or ')}. Calibrating from colours needs a white light (an LED, a torch, a bulb or daylight), with the band on the whole spectrum and Peak below 90 %.`);
+  }
+  if (chk.reversed) return fail('The spectrum runs from red on the left to blue on the right. Tap Flip left-right in the Source tab, then try again.', { reversed: true });
+  const bg = shareCrossing(fb, fg, w);
+  const gr = bg === null ? null : shareCrossing(fg, fr, w, Math.ceil(bg));
+  if (bg === null || gr === null || gr - bg < 8) return fail('The places where blue turns green and green turns red could not be found. Widen the band, or make the spectrum brighter.');
+  const rc = refCrossings(ref);
+  if (!rc) return fail('The colour reference has no blue-green and green-red hand-overs. Forget the kept colours and keep them again.');
+  const s0 = (rc[1] - rc[0]) / (gr - bg);
+  if (!(s0 >= SLOPE_RANGE[0] && s0 <= SLOPE_RANGE[1])) return fail('The colours give an implausible scale. Check that the band covers the spectrum.');
+  const xm = 0.5 * (bg + gr), lm0 = 0.5 * (rc[0] + rc[1]);
+  const L = ref.r.length;
+  const cost = ([lm, s]) => {
+    if (!(s > 0.7 * s0 && s < 1.4 * s0)) return 1;
+    let sw = 0, acc = 0;
+    for (let i = first; i <= last; i++) {
+      if (!(w[i] > 0)) continue;
+      const nm = lm + s * (i - xm);
+      if (nm < COLOUR_WINDOW[0] || nm > COLOUR_WINDOW[1]) continue;
+      const pos = (nm - ref.start) / ref.step;
+      if (pos < 0 || pos > L - 1) continue;
+      const v = w[i] * interp1(ref.trust, pos);
+      if (!(v > 0)) continue;
+      const dr = interp1(ref.r, pos) - fr[i], dg = interp1(ref.g, pos) - fg[i], db = interp1(ref.b, pos) - fb[i];
+      acc += v * (dr * dr + dg * dg + db * db); sw += v;
+    }
+    return sw >= 5 ? acc / sw : 1;
+  };
+  const fit = nelderMead(cost, [lm0, s0], [2, 0.03 * s0], 300);
+  const [lm, s] = fit.x;
+  const mismatch = Math.sqrt(Math.max(0, fit.f) / 3);   // typical difference in each share, 0 to 1
+  if (!(fit.f < 1)) return fail('The colours could not be matched. Widen the band to cover the whole spectrum.');
+  const lamAt = (x) => lm + s * (x - xm);
+  const lo = lamAt(first), hi = lamAt(last);
+  if (lo < 300 || lo > 500 || hi < 560 || hi > 950) {
+    return fail(`The colours put the spectrum at ${lo.toFixed(0)}-${hi.toFixed(0)} nm, which is not plausible. Is the band on the spectrum?`);
+  }
+  const round1 = (v) => Math.round(v * 10) / 10;
+  const nmBg = round1(lamAt(bg)), nmGr = round1(lamAt(gr));
+  const warnings = [];
+  if (ref.kind === 'model') warnings.push('This is a rough calibration: expect errors of about 10 nm, more near the ends, depending on the camera. A lamp, sunlight or a laser gives a better one.');
+  if (mismatch > 0.12) warnings.push('The colours match the reference poorly, so it may be further off.');
+  return {
+    ok: true, reversed: false, warnings, lines: 2, mismatch,
+    points: [{ off: x0 + bg - W / 2, nm: nmBg, src: 'colour' }, { off: x0 + gr - W / 2, nm: nmGr, src: 'colour' }],
+    debug: { bg, gr, refCrossings: rc, seedSlope: s0, slope: s, lm, xm, first, last, lo, hi },
+    message: `Calibrated from the colours of ${ref.kind === 'model' ? ref.name : 'this camera, as kept'}: blue turns green at ${nmBg.toFixed(1)} nm and green turns red at ${nmGr.toFixed(1)} nm, ${s.toFixed(3)} nm per pixel, ${lo.toFixed(0)} to ${hi.toFixed(0)} nm across the lit part.`,
+  };
+}
+
+/** Keep this camera's own colours from a calibrated capture of a white light: the shares on a 2 nm
+ *  grid, with a weight that is 0 where the capture had too little light to say. nmAt(i) is the
+ *  calibrated wavelength of profile column i. */
+export function colourReferenceFrom(rgb, nmAt, info = {}) {
+  const fail = (message) => ({ ok: false, message });
+  const n = rgb.r.length;
+  const { fr, fg, fb, w, top } = profileShares(rgb, 0.15);
+  if (!(top > 0)) return fail('There is no spectrum in the band.');
+  const chk = colourCheck(fr, fg, fb, w);
+  if (chk.missing.length) return fail(`This light shows no clear ${chk.missing.join(' or ')}. Keep the colours of a white light (an LED, a torch, a bulb or daylight), with the band on the whole spectrum.`);
+  let lam = Array.from({ length: n }, (_, i) => nmAt(i));
+  let idx = Array.from({ length: n }, (_, i) => i);
+  if (lam[n - 1] < lam[0]) { lam = lam.reverse(); idx = idx.reverse(); }
+  for (let i = 1; i < n; i++) if (!(lam[i] > lam[i - 1])) return fail('The calibration does not run steadily across the band.');
+  const start = 360, step = 2, L = 221;
+  const out = { r: [], g: [], b: [], trust: [] };
+  let j = 0;
+  for (let k = 0; k < L; k++) {
+    const nm = start + k * step;
+    if (nm < lam[0] || nm > lam[n - 1]) { out.r.push(0); out.g.push(0); out.b.push(0); out.trust.push(0); continue; }
+    while (j < n - 2 && lam[j + 1] < nm) j++;
+    const f = clamp((nm - lam[j]) / (lam[j + 1] - lam[j]), 0, 1), a = idx[j], b = idx[j + 1];
+    const mix = (arr) => Math.round((arr[a] * (1 - f) + arr[b] * f) * 1e4) / 1e4;
+    out.r.push(mix(fr)); out.g.push(mix(fg)); out.b.push(mix(fb)); out.trust.push(mix(w));
+  }
+  const ref = { start, step, ...out, kind: 'kept', ...info };
+  if (!refCrossings(ref)) return fail('Blue turning green and green turning red were not both found. Use a white light, with the band on the whole spectrum.');
+  return { ok: true, ref, crossings: refCrossings(ref) };
 }

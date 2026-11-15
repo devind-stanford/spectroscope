@@ -19,6 +19,12 @@ to an iPhone or Android home screen, where it also works offline.
 4. **Calibrate automatically**: point at a fluorescent lamp, or at blue sky or a white
    sheet in sunlight, cover the whole spectrum with the band, choose the light and tap
    **Auto-calibrate**. The lines it finds are listed and can be checked or edited.
+   For a light without lines (a white LED, a torch, a bulb), choose **Any white light, from
+   its colours**: it calibrates from where blue turns green and green turns red. This is
+   rough (about 10 nm) with the standard camera model; after one calibration from a lamp,
+   sunlight or marked lines, **Keep these colours** with a white light in view, and later
+   colour calibrations use this camera's own colours instead (a sunlight calibration keeps
+   them by itself).
    **Or calibrate by hand**: tap the plot on a line you recognise, pick or type its wavelength
    and add it. Add as many lines as you like: two give a straight-line fit, three a
    curved one, and from four on the fit also reports how well the lines agree.
@@ -39,6 +45,12 @@ to an iPhone or Android home screen, where it also works offline.
   lamp's mercury, terbium and europium lines. From sunlight it matches the dark lines
   against a stored reference sunlight spectrum (`js/solar.js`, from the public ASTM G173
   standard), then fits through the individual dark features.
+- Calibration from colours uses the colour shares R : G : B of each column, which depend on
+  the wavelength and the camera but not on the light. The standard camera model is the CIE
+  1931 colour matching functions (the analytic fit of Wyman, Sloan and Shirley, 2013) in
+  linear sRGB or Display P3, white-balanced to a chosen white and clipped at zero, as a
+  camera does. A camera's own colours, kept from a calibrated capture, replace the model.
+  The same idea as the desktop app's Auto-Calibrate, which locked white balance at 5000 K.
 
 The CSV columns are `pixel, wavelength_nm, R, G, B, intensity, clipped_fraction`
 (`wavelength_nm` only when calibrated).
