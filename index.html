@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob: mediastream:; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f9f9f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Spectroscope">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Spectroscope</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <header class="bar">
+    <h1>Spectroscope</h1>
+    <span id="srcStatus" class="pill">No image yet</span>
+    <span id="calStatus" class="pill">Not calibrated</span>
+  </header>
+
+  <section class="stage">
+    <div class="viewWrap" id="viewWrap">
+      <canvas id="view" aria-label="Camera image with the sampling band marked"></canvas>
+      <p id="viewHint" class="viewHint">Start the camera or load a photo. Then drag on the image to put the band on the spectrum.</p>
+      <span id="viewBadge" class="viewBadge" hidden></span>
+    </div>
+
+    <div class="plotBox">
+      <div class="legend" id="legend" role="group" aria-label="Curves shown">
+        <button type="button" class="chip" data-series="showSum" aria-pressed="true"><span class="key keySum"></span>Combined</button>
+        <button type="button" class="chip" data-series="showR" aria-pressed="true"><span class="key keyR"></span>R</button>
+        <button type="button" class="chip" data-series="showG" aria-pressed="true"><span class="key keyG"></span>G</button>
+        <button type="button" class="chip" data-series="showB" aria-pressed="true"><span class="key keyB"></span>B</button>
+      </div>
+      <div class="readout" id="readout" aria-live="off">Tap the plot to read a value.</div>
+      <div class="plotWrap" id="plotWrap">
+        <canvas id="plot" aria-label="Spectrum plot"></canvas>
+      </div>
+      <div class="plotTools">
+        <button type="button" class="mini" id="nudgeL" aria-label="Move cursor one pixel left">&#9664;</button>
+        <button type="button" class="mini" id="nudgeR" aria-label="Move cursor one pixel right">&#9654;</button>
+        <span class="spacer"></span>
+        <button type="button" class="mini wide" id="zoomIn">Zoom in</button>
+        <button type="button" class="mini wide" id="zoomOut">Zoom out</button>
+        <button type="button" class="mini wide" id="zoomFull">Full</button>
+      </div>
+    </div>
+    <div id="notices" class="notices" aria-live="polite"></div>
+  </section>
+
+  <nav class="tabs" role="tablist" aria-label="Controls">
+    <button type="button" role="tab" data-tab="source" aria-selected="true">Source</button>
+    <button type="button" role="tab" data-tab="band" aria-selected="false">Band</button>
+    <button type="button" role="tab" data-tab="calibrate" aria-selected="false">Calibrate</button>
+    <button type="button" role="tab" data-tab="save" aria-selected="false">Save</button>
+    <button type="button" role="tab" data-tab="more" aria-selected="false">More</button>
+  </nav>
+
+  <section class="panels">
+    <div class="panel" data-panel="source" role="tabpanel">
+      <div class="row buttons">
+        <button type="button" class="btn primary" id="btnCamera">Start camera</button>
+        <button type="button" class="btn" id="btnFreeze" disabled>Freeze</button>
+        <button type="button" class="btn" id="btnPhoto">Load photo</button>
+      </div>
+      <div class="row field" id="cameraRow" hidden>
+        <label for="cameraSelect">Camera</label>
+        <select id="cameraSelect"></select>
+      </div>
+      <div class="row field">
+        <label for="resolution">Video size</label>
+        <select id="resolution">
+          <option value="720">1280 &times; 720</option>
+          <option value="1080">1920 &times; 1080</option>
+          <option value="2160">3840 &times; 2160 (if the camera allows)</option>
+        </select>
+      </div>
+      <div class="row field">
+        <label for="average">Average</label>
+        <select id="average">
+          <option value="1">1 frame</option>
+          <option value="4">4 frames</option>
+          <option value="16">16 frames</option>
+        </select>
+      </div>
+      <div class="row buttons">
+        <button type="button" class="btn" id="btnRotate">Rotate 90&deg;</button>
+        <button type="button" class="btn" id="btnFlip" aria-pressed="false">Flip left-right</button>
+      </div>
+      <div class="row slider">
+        <label for="tilt">Tilt</label>
+        <button type="button" class="step" data-for="tilt" data-dir="-1" aria-label="Less tilt">&minus;</button>
+        <input type="range" id="tilt" min="-10" max="10" step="0.1" value="0">
+        <button type="button" class="step" data-for="tilt" data-dir="1" aria-label="More tilt">+</button>
+        <output id="tiltOut" for="tilt">0.0&deg;</output>
+      </div>
+      <h2>Camera controls</h2>
+      <div id="camControls" class="camControls"></div>
+      <p class="note" id="camNone">Start the camera to see which controls it offers. If it offers none, take the photo in the Camera app with exposure locked (press and hold on the picture), then load it here.</p>
+    </div>
+
+    <div class="panel" data-panel="band" role="tabpanel" hidden>
+      <div class="row slider">
+        <label for="bandPos">Position</label>
+        <button type="button" class="step" data-for="bandPos" data-dir="-1" aria-label="Move band up">&minus;</button>
+        <input type="range" id="bandPos" min="0" max="100" step="0.1" value="50">
+        <button type="button" class="step" data-for="bandPos" data-dir="1" aria-label="Move band down">+</button>
+        <output id="bandPosOut" for="bandPos"></output>
+      </div>
+      <div class="row slider">
+        <label for="bandH">Height</label>
+        <button type="button" class="step" data-for="bandH" data-dir="-1" aria-label="Thinner band">&minus;</button>
+        <input type="range" id="bandH" min="0.2" max="60" step="0.1" value="2">
+        <button type="button" class="step" data-for="bandH" data-dir="1" aria-label="Taller band">+</button>
+        <output id="bandHOut" for="bandH"></output>
+      </div>
+      <div class="row slider">
+        <label for="x0">Left edge</label>
+        <button type="button" class="step" data-for="x0" data-dir="-1" aria-label="Left edge further left">&minus;</button>
+        <input type="range" id="x0" min="0" max="90" step="0.5" value="0">
+        <button type="button" class="step" data-for="x0" data-dir="1" aria-label="Left edge further right">+</button>
+        <output id="x0Out" for="x0"></output>
+      </div>
+      <div class="row slider">
+        <label for="x1">Right edge</label>
+        <button type="button" class="step" data-for="x1" data-dir="-1" aria-label="Right edge further left">&minus;</button>
+        <input type="range" id="x1" min="10" max="100" step="0.5" value="100">
+        <button type="button" class="step" data-for="x1" data-dir="1" aria-label="Right edge further right">+</button>
+        <output id="x1Out" for="x1"></output>
+      </div>
+      <label class="check"><input type="checkbox" id="linearise"> Undo the camera's brightness curve (sRGB gamma)</label>
+      <label class="check"><input type="checkbox" id="subtractBg"> Subtract stray light, measured above and below the spectrum</label>
+      <label class="check"><input type="checkbox" id="normalise"> Scale the plot so the tallest point is 1</label>
+      <label class="check"><input type="checkbox" id="labelPeaks"> Label peaks</label>
+      <div class="row field">
+        <label for="gWeight">Combined</label>
+        <select id="gWeight">
+          <option value="1">R + G + B</option>
+          <option value="1.5">R + 1.5 G + B (desktop app default)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="panel" data-panel="calibrate" role="tabpanel" hidden>
+      <p class="fit" id="fitSummary">No lines marked yet.</p>
+      <ol class="steps">
+        <li>Tap the plot on a line you recognise. Use the arrows under the plot for single pixels.</li>
+        <li>Pick or type its wavelength, then add it. Two lines give a straight fit, three or more a curved one.</li>
+      </ol>
+      <div class="row field">
+        <label for="snap">Snap to</label>
+        <select id="snap">
+          <option value="peak">Nearest peak (bright line)</option>
+          <option value="dip">Nearest dip (dark line)</option>
+          <option value="off">Nothing</option>
+        </select>
+      </div>
+      <div class="row field">
+        <label for="preset">Known line</label>
+        <select id="preset"><option value="">Choose&hellip;</option></select>
+      </div>
+      <div class="row field">
+        <label for="nm">Wavelength</label>
+        <input type="number" id="nm" inputmode="decimal" min="200" max="1200" step="0.1" placeholder="nm">
+      </div>
+      <div class="row buttons">
+        <button type="button" class="btn primary" id="btnAddPoint">Add line at cursor</button>
+        <button type="button" class="btn" id="btnShift">Shift to match</button>
+      </div>
+      <p class="note">Shift to match slides the whole calibration sideways so the cursor reads the wavelength above. Use it after remounting the phone, with one line you trust.</p>
+      <ul class="points" id="pointList"></ul>
+      <div class="row buttons">
+        <button type="button" class="btn danger" id="btnClearPoints">Clear all lines</button>
+      </div>
+      <div class="row field">
+        <label for="refLines">Show lines</label>
+        <select id="refLines"><option value="none">None</option></select>
+      </div>
+    </div>
+
+    <div class="panel" data-panel="save" role="tabpanel" hidden>
+      <div class="row field">
+        <label for="name">Name</label>
+        <input type="text" id="name" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="60">
+      </div>
+      <div class="row buttons">
+        <button type="button" class="btn primary" id="btnSaveAll">Save all</button>
+        <button type="button" class="btn" id="btnSaveCsv">Spectrum</button>
+        <button type="button" class="btn" id="btnSavePlot">Plot</button>
+        <button type="button" class="btn" id="btnSaveFrame">Image</button>
+      </div>
+      <p class="note">Spectrum is a CSV table plus a small settings file. Plot is a PNG. Image is the frame as analysed. On iPhone the share sheet opens: choose Save to Files, AirDrop or another app. Nothing is sent anywhere unless you choose it there.</p>
+      <p class="note" id="saveStatus"></p>
+    </div>
+
+    <div class="panel" data-panel="more" role="tabpanel" hidden>
+      <h2>Privacy</h2>
+      <p class="note">This page works entirely on your device. Camera frames, spectra and calibrations are never uploaded: the page has no server, no analytics and loads nothing from other sites. Calibrations and settings are kept in this browser's storage.</p>
+      <h2>Limits</h2>
+      <p class="note">A phone camera adjusts exposure and colour by itself and applies tone curves, so heights are relative and approximate. Positions of lines are reliable once calibrated. Each camera, video size and orientation keeps its own calibration.</p>
+      <h2>Diagnostics</h2>
+      <div class="row buttons">
+        <button type="button" class="btn" id="btnDiagRefresh">Refresh</button>
+        <button type="button" class="btn" id="btnDiagCopy">Copy</button>
+      </div>
+      <pre class="diag" id="diag" tabindex="0"></pre>
+      <h2>Reset</h2>
+      <div class="row buttons">
+        <button type="button" class="btn danger" id="btnResetSettings">Reset settings</button>
+        <button type="button" class="btn danger" id="btnResetCals">Delete calibrations</button>
+      </div>
+      <p class="note" id="version"></p>
+    </div>
+  </section>
+</div>
+
+<div id="toast" class="toast" role="status" hidden></div>
+<video id="video" class="hiddenVideo" playsinline webkit-playsinline muted autoplay></video>
+<input type="file" id="file" accept="image/*" class="hiddenInput" tabindex="-1" aria-hidden="true">
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
