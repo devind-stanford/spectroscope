@@ -28,7 +28,7 @@ const els = {};
   'btnRotate', 'btnFlip', 'tilt', 'tiltOut', 'camControls', 'camNone',
   'bandPos', 'bandPosOut', 'bandH', 'bandHOut', 'x0', 'x0Out', 'x1', 'x1Out',
   'linearise', 'subtractBg', 'normalise', 'labelPeaks', 'gWeight',
-  'fitSummary', 'snap', 'preset', 'nm', 'btnAddPoint', 'btnShift', 'pointList', 'btnClearPoints', 'refLines',
+  'fitSummary', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
@@ -52,6 +52,7 @@ const P3_OK = (() => {
 const state = {
   settings: { ...DEFAULTS },
   cals: {},            // saved calibration points, one entry per camera + frame size + orientation
+  myLines: [],         // wavelengths the user chose to keep in the Known line list: [{ nm }]
   kind: null,          // 'live' or 'photo'
   frozen: false,
   srcEl: null, srcW: 0, srcH: 0, dw: 0, dh: 0, p3: false,
@@ -74,6 +75,9 @@ function loadStore() {
     const d = JSON.parse(raw);
     if (d && d.settings) state.settings = { ...DEFAULTS, ...d.settings };
     if (d && d.cals) state.cals = d.cals;
+    if (d && Array.isArray(d.lines)) {
+      state.myLines = d.lines.map((l) => ({ nm: Number(l && l.nm) })).filter((l) => l.nm >= 200 && l.nm <= 1200);
+    }
   } catch (e) { logError('storage', e); }
 }
 
@@ -81,7 +85,7 @@ let saveTimer = 0;
 function saveStore() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { localStorage.setItem(LS_KEY, JSON.stringify({ settings: state.settings, cals: state.cals })); }
+    try { localStorage.setItem(LS_KEY, JSON.stringify({ settings: state.settings, cals: state.cals, lines: state.myLines })); }
     catch (e) { logError('storage', e); }
   }, 250);
 }
@@ -560,6 +564,7 @@ function loadCalibration() {
 }
 
 function refit(save = true) {
+  state.points.sort((a, b) => a.off - b.off);   // listed left to right, however they were added
   state.cal = core.fitCalibration(state.points, state.W || 1);
   if (save) {
     if (state.points.length) state.cals[state.sig] = { points: state.points, savedAt: new Date().toISOString() };
@@ -599,6 +604,8 @@ function renderCalibration() {
   }
   for (const w of cal.warnings) text += ' ' + w;
   els.fitSummary.textContent = text;
+  els.pointsHead.textContent = `Marked lines (${state.points.length})`;
+  els.pointsHead.hidden = !state.points.length;
   els.btnShift.disabled = !cal.ok;
   els.btnClearPoints.disabled = !state.points.length;
   els.calStatus.textContent = cal.ok ? 'Calibrated' : 'Not calibrated';
@@ -633,6 +640,65 @@ function shiftToMatch() {
   state.points = state.points.map((p) => ({ off: p.off + d, nm: p.nm }));
   refit();
   toast(`Calibration moved by ${d.toFixed(1)} pixels.`);
+}
+
+function lineText(nm) { return String(Math.round(nm * 100) / 100); }
+
+/** Fill the Known line and Show lines lists: the user's own kept wavelengths first, then the built-in groups. */
+function buildLineLists() {
+  const chosen = els.preset.value;
+  const add = (parent, value, text) => {
+    const o = document.createElement('option');
+    o.value = value; o.textContent = text;
+    parent.appendChild(o);
+  };
+  els.preset.textContent = '';
+  els.refLines.textContent = '';
+  add(els.preset, '', 'Choose…');
+  add(els.refLines, 'none', 'None');
+  if (state.myLines.length) {
+    const og = document.createElement('optgroup');
+    og.label = 'My lines';
+    for (const l of state.myLines) add(og, `my:${lineText(l.nm)}`, `${lineText(l.nm)} nm`);
+    els.preset.appendChild(og);
+    add(els.refLines, 'my', 'My lines');
+  }
+  for (const g of core.LINE_GROUPS) {
+    const og = document.createElement('optgroup');
+    og.label = g.name;
+    for (const line of g.lines) add(og, `${g.id}:${line.nm}`, `${line.nm} nm, ${line.name}`);
+    els.preset.appendChild(og);
+    add(els.refLines, g.id, g.name);
+  }
+  els.preset.value = chosen;
+  if (els.preset.selectedIndex < 0) els.preset.value = '';
+  if (state.settings.refLines === 'my' && !state.myLines.length) state.settings.refLines = 'none';
+  els.refLines.value = state.settings.refLines;
+  els.btnKeepLine.textContent = els.preset.value.startsWith('my:') ? 'Forget' : 'Keep';
+}
+
+/** Keep the typed wavelength in the user's own list, or drop the kept one that is selected. */
+function keepOrForgetLine() {
+  let select = '';
+  if (els.preset.value.startsWith('my:')) {
+    const nm = Number(els.preset.value.slice(3));
+    state.myLines = state.myLines.filter((l) => Math.abs(l.nm - nm) > 0.005);
+    toast(`${lineText(nm)} nm removed from My lines.`);
+  } else {
+    const nm = readNm();
+    if (nm === null) return;
+    const v = Math.round(nm * 100) / 100;
+    if (!state.myLines.some((l) => Math.abs(l.nm - v) < 0.005)) state.myLines.push({ nm: v });
+    state.myLines.sort((a, b) => a.nm - b.nm);
+    select = `my:${lineText(v)}`;
+    toast(`${lineText(v)} nm kept under My lines.`);
+  }
+  saveStore();
+  els.preset.value = select;   // not in the list yet when just kept; buildLineLists() falls back to "Choose"
+  buildLineLists();
+  els.preset.value = select;
+  els.btnKeepLine.textContent = select ? 'Forget' : 'Keep';
+  requestRender();
 }
 
 // ---------------------------------------------------------------- drawing
@@ -725,7 +791,9 @@ function drawSpectrum() {
       return { px, height: f.height * norm, text: cal ? pxToNm(px).toFixed(1) : String(Math.round(px)) };
     });
   }
-  const group = core.LINE_GROUPS.find((g) => g.id === s.refLines);
+  let refLines = [];
+  if (cal && s.refLines === 'my') refLines = state.myLines.map((l) => ({ nm: l.nm, label: String(Math.round(l.nm)) }));
+  else if (cal) { const group = core.LINE_GROUPS.find((g) => g.id === s.refLines); if (group) refLines = group.lines; }
   state.geom = drawPlot(els.plot, {
     cssW, cssH, dpr, colors,
     x0: p.x0, n: p.n, raw: p.raw, clip: p.clip, view,
@@ -738,7 +806,7 @@ function drawSpectrum() {
     pxToNm: cal ? pxToNm : null, nmToPx: cal ? nmToPx : null,
     cursorPx: state.cursorPx,
     calPoints: state.points.map((q) => ({ px: q.off + state.W / 2 })),
-    refLines: cal && group ? group.lines : [],
+    refLines,
     peaks,
     yLabel: s.normalise ? 'Relative signal' : 'Signal',
   });
@@ -1021,28 +1089,19 @@ function wire() {
   els.zoomFull.addEventListener('click', () => { state.view = null; requestRender(); });
 
   // calibration
-  for (const g of core.LINE_GROUPS) {
-    const og = document.createElement('optgroup');
-    og.label = g.name;
-    for (const line of g.lines) {
-      const o = document.createElement('option');
-      o.value = `${g.id}:${line.nm}`;
-      o.textContent = `${line.nm} nm, ${line.name}`;
-      og.appendChild(o);
-    }
-    els.preset.appendChild(og);
-    const r = document.createElement('option');
-    r.value = g.id; r.textContent = g.name;
-    els.refLines.appendChild(r);
-  }
+  buildLineLists();
   els.preset.addEventListener('change', () => {
     const [group, nm] = els.preset.value.split(':');
+    els.btnKeepLine.textContent = group === 'my' ? 'Forget' : 'Keep';
     if (!nm) return;
     els.nm.value = nm;
+    if (group === 'my') return;                      // your own lines: leave the snap choice as it is
     const mode = group === 'sun' ? 'dip' : 'peak';   // sunlight lines are dark, lamp and laser lines bright
     els.snap.value = mode;
     setSetting('snap', mode);
   });
+  els.nm.addEventListener('input', () => { els.preset.value = ''; els.btnKeepLine.textContent = 'Keep'; });
+  els.btnKeepLine.addEventListener('click', keepOrForgetLine);
   els.btnAddPoint.addEventListener('click', addPoint);
   els.btnShift.addEventListener('click', shiftToMatch);
   els.btnClearPoints.addEventListener('click', () => {

@@ -153,7 +153,8 @@
       <p class="fit" id="fitSummary">No lines marked yet.</p>
       <ol class="steps">
         <li>Tap the plot on a line you recognise. Use the arrows under the plot for single pixels.</li>
-        <li>Pick or type its wavelength, then add it. Two lines give a straight fit, three or more a curved one.</li>
+        <li>Pick a known line, or type any wavelength, then add it.</li>
+        <li>Repeat for as many lines as you like. Two give a straight fit and three a curved one; every line after that averages out small errors and shows how well the lines agree.</li>
       </ol>
       <div class="row field">
         <label for="snap">Snap to</label>
@@ -169,13 +170,16 @@
       </div>
       <div class="row field">
         <label for="nm">Wavelength</label>
-        <input type="number" id="nm" inputmode="decimal" min="200" max="1200" step="0.1" placeholder="nm">
+        <input type="number" id="nm" inputmode="decimal" min="200" max="1200" step="any" placeholder="any value, nm">
+        <button type="button" class="mini" id="btnKeepLine">Keep</button>
       </div>
+      <p class="note">Keep stores the typed wavelength under My lines in the list above, so it is there next time.</p>
       <div class="row buttons">
         <button type="button" class="btn primary" id="btnAddPoint">Add line at cursor</button>
         <button type="button" class="btn" id="btnShift">Shift to match</button>
       </div>
       <p class="note">Shift to match slides the whole calibration sideways so the cursor reads the wavelength above. Use it after remounting the phone, with one line you trust.</p>
+      <h2 id="pointsHead" hidden>Marked lines</h2>
       <ul class="points" id="pointList"></ul>
       <div class="row buttons">
         <button type="button" class="btn danger" id="btnClearPoints">Clear all lines</button>

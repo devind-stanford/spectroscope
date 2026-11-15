@@ -9,7 +9,7 @@
 //   - Polynomial coefficients are stored highest power first:
 //     wavelength_nm = c[0] * offset^2 + c[1] * offset + c[2]   (or c[0] * offset + c[1]).
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;

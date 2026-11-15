@@ -11,9 +11,11 @@ to an iPhone or Android home screen, where it also works offline.
    the spectrum runs left to right with blue on the left.
 3. **Band**: drag on the picture to put the sampling band on the spectrum. Each
    column inside the band is averaged to give the R, G, B and combined curves.
-4. **Calibrate**: tap the plot on a line you recognise, enter its wavelength and add
-   it. Two lines give a straight-line fit and three or more a curved one. The
-   calibration is remembered for that camera, frame size and orientation.
+4. **Calibrate**: tap the plot on a line you recognise, pick or type its wavelength
+   and add it. Add as many lines as you like: two give a straight-line fit, three a
+   curved one, and from four on the fit also reports how well the lines agree.
+   **Keep** stores a typed wavelength in the list for next time. The calibration is
+   remembered for that camera, frame size and orientation.
 5. **Save**: write the spectrum (CSV plus a settings file), the plot and the image.
 
 ## What it measures

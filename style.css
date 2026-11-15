@@ -192,6 +192,7 @@ html, body {
   font-size: 13px;
 }
 .mini:active { background: var(--btn-press); }
+.row .mini { flex: none; min-height: 40px; min-width: 64px; }
 
 .notices { padding: 4px 4px 0; }
 .notice {
