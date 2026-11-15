@@ -26,6 +26,7 @@ function tickDecimals(step) {
  *   calPoints                 [{ px }]
  *   refLines                  [{ nm, label }]
  *   peaks                     [{ px, text }]
+ *   features                  [{ px, tag }]  labelled lines (what causes them), or []
  *   yLabel, colors
  * Returns the plot rectangle and x-range, for turning touches into columns. */
 export function drawPlot(canvas, m) {
@@ -64,7 +65,8 @@ export function drawPlot(canvas, m) {
     for (let i = ia; i <= ib; i++) if (s.y[i] > ymax) ymax = s.y[i];
   }
   if (!(ymax > 0)) ymax = 1;
-  const yTop = ymax * (m.peaks.length ? 1.22 : 1.1);
+  const features = m.features || [];
+  const yTop = ymax * (features.length ? 1.34 : m.peaks.length ? 1.22 : 1.1);
   const Y = (v) => bottom - (v / yTop) * plotH;
 
   // clipped columns
@@ -91,7 +93,7 @@ export function drawPlot(canvas, m) {
     ctx.fillText(v.toFixed(yDec), left - 5, y + 3.5);
   }
 
-  // reference lines
+  // reference lines (their letters give way to the feature labels, which take the same place)
   if (m.nmToPx && m.refLines.length) {
     ctx.textAlign = 'center';
     let row = 0;
@@ -100,9 +102,11 @@ export function drawPlot(canvas, m) {
       if (px === null || px < xa || px > xb) continue;
       const x = Math.round(X(px)) + 0.5;
       ctx.strokeStyle = colors.ref;
-      ctx.beginPath(); ctx.moveTo(x, top + 22); ctx.lineTo(x, bottom); ctx.stroke();
-      ctx.fillStyle = colors.ink2;
-      ctx.fillText(line.label, x, top + 9 + (row % 2) * 11);
+      ctx.beginPath(); ctx.moveTo(x, top + (features.length ? 0 : 22)); ctx.lineTo(x, bottom); ctx.stroke();
+      if (!features.length) {
+        ctx.fillStyle = colors.ink2;
+        ctx.fillText(line.label, x, top + 9 + (row % 2) * 11);
+      }
       row++;
     }
   }
@@ -149,6 +153,32 @@ export function drawPlot(canvas, m) {
     ctx.strokeText(p.text, x, y);
     ctx.fillStyle = colors.ink;
     ctx.fillText(p.text, x, y);
+  }
+
+  // features and what causes them: short labels in up to three rows along the top, each with a
+  // thin leader down to its line on the combined curve
+  const sum = m.series.find((s) => !s.tag) || m.series[0];
+  const rowsEnd = [-Infinity, -Infinity, -Infinity];
+  ctx.textAlign = 'center';
+  for (const f of features) {
+    if (f.px < xa || f.px > xb) continue;
+    const x = X(f.px), tw = ctx.measureText(f.tag).width;
+    let row = rowsEnd.findIndex((end) => x - tw / 2 > end + 4);
+    if (row < 0) row = rowsEnd.indexOf(Math.min(...rowsEnd));
+    rowsEnd[row] = x + tw / 2;
+    const ty = top + 9 + row * 12;
+    const v = sum.y[clamp(Math.round(f.px - m.x0), 0, m.n - 1)];
+    const yc = Y(v);
+    if (yc > ty + 6) {
+      ctx.strokeStyle = colors.ref; ctx.lineWidth = 1;
+      ctx.setLineDash([2, 2]);
+      ctx.beginPath(); ctx.moveTo(Math.round(x) + 0.5, ty + 3); ctx.lineTo(Math.round(x) + 0.5, yc - 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.lineWidth = 3; ctx.strokeStyle = colors.bg;
+    ctx.strokeText(f.tag, x, ty);
+    ctx.fillStyle = colors.ink;
+    ctx.fillText(f.tag, x, ty);
   }
 
   // marked calibration lines
@@ -234,4 +264,120 @@ export function drawPlot(canvas, m) {
     ctx.beginPath(); ctx.arc(x, top - 6, 3.5, 0, 2 * Math.PI); ctx.fill();
   }
   return geom;
+}
+
+/** The calibration itself, in three panels over the band's pixel columns: wavelength, how far it
+ *  departs from a straight line, and nanometres per pixel. Outside the marked lines the fit is
+ *  extrapolated, so the curves are dashed there.
+ *  model: cssW, cssH, dpr, colors, pxA, pxB (columns across the band), nmAt(px),
+ *         span [first, last marked column], points [{ px, nm }].
+ *  Returns { line: [slope, intercept], maxDev, nmPerPx: [at pxA, at pxB] }. */
+export function drawCalPlot(canvas, m) {
+  const ctx = canvas.getContext('2d');
+  const { cssW, cssH, dpr, colors } = m;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+  ctx.fillStyle = colors.bg;
+  ctx.fillRect(0, 0, cssW, cssH);
+  ctx.font = FONT;
+  const left = 46, right = cssW - 12, bottomAxis = 30;
+  const plotW = Math.max(10, right - left);
+  const pxA = m.pxA, pxB = Math.max(m.pxB, m.pxA + 1);
+  const X = (px) => left + (px - pxA) / (pxB - pxA) * plotW;
+  const N = 160, xs = [], nm = [], per = [];
+  for (let k = 0; k <= N; k++) {
+    const px = pxA + (pxB - pxA) * k / N;
+    xs.push(px); nm.push(m.nmAt(px)); per.push(Math.abs(m.nmAt(px + 0.5) - m.nmAt(px - 0.5)));
+  }
+  // the straight line closest to the curve between the marked lines
+  const [sa, sb] = [Math.max(pxA, m.span[0]), Math.min(pxB, m.span[1])];
+  let n0 = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;
+  for (let k = 0; k <= 200; k++) {
+    const px = sa + (sb - sa) * k / 200, v = m.nmAt(px);
+    n0++; sx += px; sy += v; sxx += px * px; sxy += px * v;
+  }
+  const den = n0 * sxx - sx * sx;
+  const slope = den > 0 ? (n0 * sxy - sx * sy) / den : 0, icpt = (sy - slope * sx) / n0;
+  const line = (px) => slope * px + icpt;
+  const dev = nm.map((v, k) => v - line(xs[k]));
+  const ptDev = m.points.map((p) => ({ px: p.px, v: p.nm - line(p.px) }));
+  let maxDev = 0;
+  for (let k = 0; k <= N; k++) if (xs[k] >= sa && xs[k] <= sb) maxDev = Math.max(maxDev, Math.abs(dev[k]));
+
+  const panels = [
+    { title: 'Wavelength (nm)', y: nm, pts: m.points.map((p) => ({ px: p.px, v: p.nm })), ref: line },
+    { title: 'Departure from a straight line (nm)', y: dev, pts: ptDev, zero: true },
+    { title: 'Nanometres per pixel', y: per, pts: [] },
+  ];
+  const gap = 16, ph = Math.max(30, (cssH - bottomAxis - 4 - panels.length * gap) / panels.length);
+  let y0 = 4;
+  const inSpan = (px) => px >= m.span[0] - 0.5 && px <= m.span[1] + 0.5;
+  for (const p of panels) {
+    const top = y0 + gap, bottom = top + ph;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of p.y) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    for (const q of p.pts) { lo = Math.min(lo, q.v); hi = Math.max(hi, q.v); }
+    if (p.zero) { lo = Math.min(lo, 0); hi = Math.max(hi, 0); }
+    if (!(hi - lo > 1e-9)) { const c = Number.isFinite(lo) ? lo : 0; lo = c - (p.zero ? 0.5 : Math.max(0.01, Math.abs(c) * 0.02)); hi = c + (p.zero ? 0.5 : Math.max(0.01, Math.abs(c) * 0.02)); }
+    const pad = 0.08 * (hi - lo);
+    lo -= pad; hi += pad;
+    const Y = (v) => bottom - (v - lo) / (hi - lo) * ph;
+    // title, grid and y ticks
+    ctx.textAlign = 'left'; ctx.fillStyle = colors.ink2;
+    ctx.fillText(p.title, left, top - 5);
+    const step = niceStep(hi - lo, Math.max(2, Math.round(ph / 26)));
+    const dec = tickDecimals(step);
+    ctx.textAlign = 'right'; ctx.lineWidth = 1;
+    for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) {
+      const y = Math.round(Y(v)) + 0.5;
+      ctx.strokeStyle = p.zero && Math.abs(v) < step / 2 ? colors.axis : colors.grid;
+      ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(right, y); ctx.stroke();
+      ctx.fillStyle = colors.muted;
+      ctx.fillText((Math.abs(v) < step / 1e6 ? 0 : v).toFixed(dec), left - 5, y + 3.5);
+    }
+    ctx.save();
+    ctx.beginPath(); ctx.rect(left, top - 1, plotW, ph + 2); ctx.clip();
+    if (p.ref) {   // the straight line, for comparison
+      ctx.strokeStyle = colors.muted; ctx.lineWidth = 1; ctx.setLineDash([5, 4]);
+      ctx.beginPath(); ctx.moveTo(X(pxA), Y(p.ref(pxA))); ctx.lineTo(X(pxB), Y(p.ref(pxB))); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    // the curve: solid between the marked lines, dashed where it is extrapolated
+    ctx.strokeStyle = colors.ink; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    for (const solid of [true, false]) {
+      ctx.setLineDash(solid ? [] : [3, 4]);
+      ctx.beginPath();
+      let on = false;
+      for (let k = 0; k <= N; k++) {
+        const want = inSpan(xs[k]) === solid;
+        const x = X(xs[k]), y = Y(p.y[k]);
+        if (want) { if (on) ctx.lineTo(x, y); else ctx.moveTo(x, y); on = true; }
+        else if (on) { ctx.lineTo(x, y); on = false; }
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.restore();
+    // marked lines: dots with a ring of the background, so they stand off the curve
+    for (const q of p.pts) {
+      const x = X(q.px), y = Y(q.v);
+      ctx.fillStyle = colors.bg;
+      ctx.beginPath(); ctx.arc(x, y, 5.5, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillStyle = colors.accent;
+      ctx.beginPath(); ctx.arc(x, y, 4, 0, 2 * Math.PI); ctx.fill();
+    }
+    y0 = bottom;
+  }
+  // x axis: pixel columns of the frame
+  const axisY = y0 + 3;
+  ctx.strokeStyle = colors.axis; ctx.fillStyle = colors.muted; ctx.textAlign = 'center';
+  const xstep = Math.max(1, niceStep(pxB - pxA, Math.max(2, Math.round(plotW / 60))));
+  for (let t = Math.ceil(pxA / xstep) * xstep; t <= pxB + 1e-9; t += xstep) {
+    const x = Math.round(X(t)) + 0.5;
+    ctx.beginPath(); ctx.moveTo(x, axisY); ctx.lineTo(x, axisY + 4); ctx.stroke();
+    ctx.fillText(String(Math.round(t)), clamp(x, left + 10, right - 10), axisY + 15);
+  }
+  ctx.fillStyle = colors.ink2;
+  ctx.fillText('Pixel column', left + plotW / 2, cssH - 3);
+  return { line: [slope, icpt], maxDev, nmPerPx: [per[0], per[N]] };
 }

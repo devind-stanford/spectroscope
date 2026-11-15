@@ -2,7 +2,7 @@
 // profiles -> wavelength calibration -> files. Everything runs in the browser.
 
 import * as core from './core.js';
-import { drawPlot } from './plot.js';
+import { drawPlot, drawCalPlot } from './plot.js';
 import { SOLAR } from './solar.js';
 
 const LS_KEY = 'spectroscope.v1';
@@ -20,8 +20,9 @@ const DEFAULTS = {
   gWeight: 1, average: 4, resolution: '1080',
   showSum: true, showR: true, showG: true, showB: true,
   snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp', colourWb: 'd65',
-  follow: true, bigOnStart: true, keepFixed: true,
+  follow: true, bigOnStart: true, keepFixed: true, labelFeatures: false,
 };
+const LABEL_KINDS = { lamp: 'lamp', sun: 'sun' };   // which lights have lines to label
 const AUTO_SOURCES = ['lamp', 'sun', 'colour'];
 const FIND_EVERY_MS = 500;     // how often the live view looks for the spectrum when following it
 const NOTICE_MS = 6000;        // how long warnings stay on the picture after a capture
@@ -33,12 +34,12 @@ const els = {};
   'btnRotate', 'btnFlip', 'tilt', 'tiltOut', 'camControls', 'camNone',
   'bandPos', 'bandPosOut', 'bandH', 'bandHOut', 'x0', 'x0Out', 'x1', 'x1Out',
   'linearise', 'subtractBg', 'normalise', 'labelPeaks', 'gWeight',
-  'fitSummary', 'autoSource', 'btnAuto', 'autoStatus', 'colourBox', 'colourWbRow', 'colourWb', 'colourNote', 'btnKeepColours', 'btnForgetColours', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
+  'fitSummary', 'calPlotWrap', 'calPlot', 'calPlotNote', 'btnLabels', 'featureHead', 'featureList', 'featureNote', 'autoSource', 'btnAuto', 'autoStatus', 'colourBox', 'colourWbRow', 'colourWb', 'colourNote', 'btnKeepColours', 'btnForgetColours', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
-  'ovRotate', 'ovBig', 'bigBar', 'bigCapture', 'bigFind', 'bigFocus', 'bigRotate', 'bigExit',
-  'btnBig', 'btnFind', 'btnFocus', 'bigOnStart', 'keepFixed', 'follow',
+  'ovRotate', 'ovBig', 'bigBar', 'bigCapture', 'bigFind', 'bigRotate', 'bigExit',
+  'btnBig', 'btnFind', 'bigOnStart', 'keepFixed', 'follow',
 ].forEach((id) => { els[id] = $(id); });
 const appEl = document.querySelector('.app');
 
@@ -77,6 +78,8 @@ const state = {
   holdComp: 0,         // the same, for the captured frame
   rotatesWithScreen: null,   // does this browser turn camera frames when the screen turns? (learnt)
   big: false, lastFind: 0, findState: '', noticesUntil: 0, noticeTimer: 0,
+  features: [],        // labelled features of the current spectrum: [{ px, nm, tag, lines }]
+  featureKey: '',
 };
 
 // ---------------------------------------------------------------- storage
@@ -202,15 +205,6 @@ function drawFrame() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
-/** A point of the analysed frame (fractions 0..1) as a point of the camera's own picture. */
-function frameToSource(fx, fy) {
-  const a = -frameAngle() * Math.PI / 180;
-  let px = fx * state.W - state.W / 2, py = fy * state.H - state.H / 2;
-  if (state.settings.flip) px = -px;
-  const qx = px * Math.cos(a) - py * Math.sin(a), qy = px * Math.sin(a) + py * Math.cos(a);
-  return { x: core.clamp((qx + state.dw / 2) / state.dw, 0, 1), y: core.clamp((qy + state.dh / 2) / state.dh, 0, 1) };
-}
-
 // ---------------------------------------------------------------- turning the phone
 
 /** How far the screen is turned from upright, in degrees: 0, 90 (top of the phone to the left),
@@ -290,7 +284,8 @@ function applyBox(box, gentle) {
   return changed;
 }
 
-/** One-shot search (button): turns the picture if the spectrum runs up and down, then places the band. */
+/** One-shot search (button): turns the picture if the spectrum runs up and down, levels it with
+ *  the tilt so it runs straight across, then places the band. */
 function findSpectrum() {
   if (!state.W) { toast('Start the camera or load a photo first.'); return; }
   try {
@@ -301,6 +296,19 @@ function findSpectrum() {
       drawFrame();
       box = detectBand();
     }
+    // A mirrored frame turns the other way (see drawFrame), so the correction changes sign with Flip.
+    // Twice, since the first turn brings more of the band into view.
+    let turned = 0;
+    for (let k = 0; k < 2 && box && !box.vertical && box.angle !== null && Math.abs(box.angle) > 0.3; k++) {
+      const s = state.settings;
+      const next = core.clamp(Math.round((s.tilt + (s.flip ? box.angle : -box.angle)) * 10) / 10, -45, 45);
+      if (next === s.tilt) break;
+      turned += next - s.tilt;
+      els.tilt.value = next;
+      setSetting('tilt', next);
+      drawFrame();
+      box = detectBand();
+    }
     if (!box || box.vertical) {
       toast('No spectrum found. Point the spectroscope at a light and check that the rainbow is in the picture.');
       return;
@@ -308,40 +316,8 @@ function findSpectrum() {
     applyBox(box, false);
     if (isLive()) { setSetting('follow', true); els.follow.checked = true; }
     reprocess();
-    toast('Band placed on the spectrum.');
+    toast(Math.abs(turned) >= 0.1 ? `Band placed on the spectrum; the picture was turned ${Math.abs(turned).toFixed(1)}° to level it (Tilt ${state.settings.tilt.toFixed(1)}°).` : 'Band placed on the spectrum.', 4500);
   } catch (e) { logError('find spectrum', e); }
-}
-
-/** Ask the camera to focus and meter at a point of the analysed frame, if the browser lets the page. */
-async function focusAt(fx, fy, quiet) {
-  const t = state.track;
-  if (!t || !isLive()) { if (!quiet) toast('Focus works while the camera is live.'); return; }
-  let sup = {}, caps = {};
-  try { sup = navigator.mediaDevices.getSupportedConstraints() || {}; } catch (e) { sup = {}; }
-  try { caps = (t.getCapabilities && t.getCapabilities()) || {}; } catch (e) { caps = {}; }
-  const adv = {};
-  if (sup.pointsOfInterest) adv.pointsOfInterest = [frameToSource(fx, fy)];
-  if (Array.isArray(caps.focusMode)) {
-    if (caps.focusMode.includes('single-shot')) adv.focusMode = 'single-shot';
-    else if (caps.focusMode.includes('continuous')) adv.focusMode = 'continuous';
-  }
-  if (adv.pointsOfInterest && Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) adv.exposureMode = 'continuous';
-  if (!Object.keys(adv).length) {
-    if (!quiet) toast('This camera does not let the page choose where to focus; the phone focuses by itself.', 5000);
-    return;
-  }
-  try {
-    await t.applyConstraints({ advanced: [adv] });
-    if (!quiet) toast(adv.pointsOfInterest ? 'Focusing and metering on the spectrum.' : 'Refocusing.');
-  } catch (e) {
-    logError('focus', e);
-    if (!quiet) toast('The camera refused to refocus.');
-  }
-}
-
-function focusOnBand() {
-  const s = state.settings;
-  focusAt((s.x0 + s.x1) / 200, s.bandPos / 100, false);
 }
 
 // ---------------------------------------------------------------- big view
@@ -784,6 +760,13 @@ function refit(save = true) {
 
 function signed(v) { return (v >= 0 ? '+' : '−') + Math.abs(v).toFixed(2); }
 
+/** What makes a line of sunlight or of a lamp at about this wavelength, from the catalogue. */
+function causeOf(kind, nm, tol = 2) {
+  let best = null;
+  for (const f of core.FEATURES[kind] || []) if (Math.abs(f.nm - nm) <= tol && (!best || Math.abs(f.nm - nm) < Math.abs(best.nm - nm))) best = f;
+  return best;
+}
+
 function renderCalibration() {
   const cal = state.cal, list = els.pointList;
   list.textContent = '';
@@ -794,6 +777,8 @@ function renderCalibration() {
     if (p.src) {
       const tag = document.createElement('small');
       tag.textContent = p.src === 'sun' ? '  from sunlight' : p.src === 'colour' ? '  from colours' : '  from lamp';
+      const why = p.src === 'sun' || p.src === 'lamp' ? causeOf(p.src, p.nm) : null;
+      if (why) tag.textContent += `: ${why.tag}, ${why.what}`;
       span.appendChild(tag);
     }
     if (cal.ok && cal.n > cal.degree + 1) {
@@ -826,6 +811,46 @@ function renderCalibration() {
   els.calStatus.textContent = cal.ok ? 'Calibrated' : 'Not calibrated';
   els.calStatus.classList.toggle('good', cal.ok);
   updateColourBox();
+  renderCalPlot();
+}
+
+/** The calibration drawn out (wavelength, departure from a straight line, nm per pixel) and what
+ *  that means for resolution. Drawn while the Calibrate tab is open. */
+function renderCalPlot() {
+  const cal = state.cal;
+  const on = cal.ok && state.W > 0;
+  els.calPlotWrap.hidden = !on;
+  els.calPlotNote.hidden = !on;
+  if (!on || !els.calPlotWrap.clientWidth) return;
+  const q = bandRect();
+  const pts = state.points.map((p) => ({ px: p.off + state.W / 2, nm: p.nm }));
+  const span = pts.length ? [Math.min(...pts.map((p) => p.px)), Math.max(...pts.map((p) => p.px))] : [q.xa, q.xa + q.n - 1];
+  const { cssW, cssH, dpr } = sizeCanvas(els.calPlot, els.calPlotWrap, 3);
+  const g = drawCalPlot(els.calPlot, {
+    cssW, cssH, dpr, colors: themeColors(), pxA: q.xa, pxB: q.xa + q.n - 1, nmAt: pxToNm, span, points: pts,
+  });
+  const na = pxToNm(q.xa), nb = pxToNm(q.xa + q.n - 1);
+  const [pa, pb] = g.nmPerPx;
+  const lo = Math.min(pa, pb), hi = Math.max(pa, pb);
+  const per = Math.abs(hi - lo) < 0.005 ? `${lo.toFixed(2)} nm` : `${pa.toFixed(2)} nm at ${na.toFixed(0)} nm and ${pb.toFixed(2)} nm at ${nb.toFixed(0)} nm`;
+  let text = `Each pixel spans ${per}. Detail finer than two pixels (${(2 * lo).toFixed(1)}${hi - lo >= 0.05 ? `–${(2 * hi).toFixed(1)}` : ''} nm) cannot show; the slit and the focus usually blur more than that.`;
+  if (cal.degree === 2) text += ` Between the outermost marked lines the fit departs from a straight line by up to ${g.maxDev.toFixed(1)} nm.`;
+  else text += ' With two lines the fit is a straight line; a third shows how far the real scale bends.';
+  // the resolution actually reached: the width of the sharpest lamp line
+  const p = state.profile;
+  if (p && state.autoInfo && state.autoInfo.source === 'lamp') {
+    let best = null;
+    for (const pt of pts) {
+      const i = pt.px - p.x0;
+      if (i < 3 || i > p.n - 4) continue;
+      const wpx = core.peakWidth(p.sum, i, Math.max(6, Math.round(p.n / 30)));
+      if (wpx === null) continue;
+      const wnm = wpx * Math.abs(pxToNm(pt.px + 0.5) - pxToNm(pt.px - 0.5));
+      if (!best || wnm < best.wnm) best = { wnm, wpx, nm: pt.nm };
+    }
+    if (best) text += ` The sharpest lamp line here, ${best.nm.toFixed(1)} nm, is ${best.wnm.toFixed(1)} nm (${best.wpx.toFixed(1)} pixels) wide at half height: the resolution actually reached.`;
+  }
+  els.calPlotNote.textContent = text;
 }
 
 function readNm() {
@@ -925,7 +950,13 @@ function runAuto() {
     let res, ref = null;
     try {
       if (src === 'colour') { ref = colourReference(); res = core.autoCalibrateColour(p, p.x0, state.W, ref); }
-      else res = src === 'sun' ? core.autoCalibrateSun(p.sum, p.x0, state.W, SOLAR) : core.autoCalibrateLamp(p.sum, p.x0, state.W);
+      else {
+        // the colours settle ties between matches: this camera's kept colours, or a standard
+        // camera in daylight (the camera balances a lamp or the sky to about white)
+        ref = keptColours() || core.colourModel({ white: 'd65', space: state.p3 ? 'p3' : 'srgb' });
+        const opts = { rgb: linearProfile(), colourRef: ref };
+        res = src === 'sun' ? core.autoCalibrateSun(p.sum, p.x0, state.W, SOLAR, opts) : core.autoCalibrateLamp(p.sum, p.x0, state.W, opts);
+      }
     } catch (e) {
       logError('auto-calibrate', e);
       res = { ok: false, message: 'Auto-calibration failed with an error. See More, Diagnostics.', warnings: [] };
@@ -938,24 +969,80 @@ function runAuto() {
     }
     state.points = res.points.map((q) => ({ off: q.off, nm: q.nm, src: q.src }));
     state.autoInfo = { source: src, match: res.r === undefined ? null : Math.round(res.r * 1000) / 1000, lines: res.points.length, at: new Date().toISOString() };
-    if (src === 'colour') {
-      state.autoInfo.colour_mismatch = Math.round(res.mismatch * 1000) / 1000;
-      state.autoInfo.colours = ref.kind === 'model' ? `standard camera model, white balance ${ref.white}, ${ref.space}` : `kept ${ref.savedAt || ''} from ${ref.from || 'a calibrated capture'}`;
-    }
+    const round3 = (v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : null);
+    state.autoInfo.colours = ref.kind === 'model' ? `standard camera model, white balance ${ref.white}, ${ref.space}` : `kept ${ref.savedAt || ''} from ${ref.from || 'a calibrated capture'}`;
+    if (src === 'colour') state.autoInfo.colour_mismatch = round3(res.mismatch);
+    else { state.autoInfo.colour_mismatch = round3(res.colourMismatch); state.autoInfo.colours_decided = !!res.coloursDecided; }
     refit();
     const extra = [];
     // sunlight is a white light with a known calibration: keep its colours for later, if none are kept yet
     if (src === 'sun' && !keptColours() && keepColours(true)) extra.push('Its colours were also kept, for calibrating from colours later.');
+    if (p.hRows < 6) extra.push(`The band is only ${p.hRows} row${p.hRows > 1 ? 's' : ''} tall, which makes the curves noisy: level the spectrum with Find spectrum or Tilt, then use a taller band.`);
     say([res.message, ...res.warnings, ...extra].join(' '));
     if (src !== 'colour') {
       els.refLines.value = src === 'sun' ? 'sun' : 'fluor';
       setSetting('refLines', els.refLines.value);
       els.snap.value = src === 'sun' ? 'dip' : 'peak';
       setSetting('snap', els.snap.value);
+      setLabels(true);   // name what makes the lines that were found
     }
     updateColourBox();
     toast(`Calibrated from ${AUTO_NAMES[src]}.`);
   }, 30);
+}
+
+/** Turn the feature labels on or off. */
+function setLabels(on) {
+  setSetting('labelFeatures', !!on);
+  els.btnLabels.setAttribute('aria-pressed', String(!!on));
+  state.featureKey = null;   // rebuild the list on the next render
+  requestRender();
+}
+
+/** Which catalogue the labels use: the light chosen under Light, if it has lines. */
+function labelKind() {
+  return LABEL_KINDS[els.autoSource.value] || null;
+}
+
+/** Find and name the features of the current spectrum (when labels are on), and list them. */
+function updateFeatures() {
+  const s = state.settings, p = state.profile, kind = labelKind();
+  let list = [], note = '';
+  if (s.labelFeatures) {
+    if (!calOk()) note = 'Calibrate first: the labels need wavelengths.';
+    else if (!kind) note = 'A white LED or a bulb has no lines to name. Choose Fluorescent lamp or Sunlight under Light to label their lines.';
+    else if (p) {
+      list = core.labelFeatures(p.sum, (i) => pxToNm(p.x0 + i), kind, p.clip).map((f) => ({ ...f, px: p.x0 + f.i }));
+      if (!list.length) note = `No ${kind === 'sun' ? 'dark lines of sunlight' : 'lamp lines'} stand out here.`;
+    }
+  }
+  state.features = list;
+  const key = `${s.labelFeatures}|${kind}|${note}|` + list.map((f) => `${f.tag}${f.nm.toFixed(1)}`).join(',');
+  if (key === state.featureKey) return;
+  state.featureKey = key;
+  els.featureList.textContent = '';
+  for (const f of list) {
+    const li = document.createElement('li');
+    const b = document.createElement('b');
+    b.textContent = f.tag;
+    li.appendChild(b);
+    li.appendChild(document.createTextNode(`found at ${f.nm.toFixed(1)} nm. ` + f.lines.map((l) => `The ${l.name} at ${l.nm.toFixed(1)} nm, from ${l.what}`).join('. ') + '.'));
+    els.featureList.appendChild(li);
+  }
+  els.featureHead.hidden = !list.length;
+  els.featureList.hidden = !list.length;
+  els.featureNote.hidden = !note;
+  els.featureNote.textContent = note;
+}
+
+/** The labelled feature at the cursor, if any (within two nm or three pixels). */
+function featureAt(px) {
+  if (px === null || !state.features.length) return null;
+  const per = calOk() ? Math.abs(pxToNm(px + 0.5) - pxToNm(px - 0.5)) : 1;
+  const tol = Math.max(3, 2 / Math.max(per, 1e-6));
+  let best = null;
+  for (const f of state.features) if (Math.abs(f.px - px) <= tol && (!best || Math.abs(f.px - px) < Math.abs(best.px - px))) best = f;
+  return best;
 }
 
 function shiftToMatch() {
@@ -1093,6 +1180,7 @@ function themeColors() {
 function drawSpectrum() {
   const { cssW, cssH, dpr } = sizeCanvas(els.plot, els.plotWrap, 3);
   const p = state.profile, s = state.settings, colors = themeColors();
+  updateFeatures();
   if (!p) { state.geom = drawPlot(els.plot, { cssW, cssH, dpr, n: 0, colors }); return; }
   const full = [p.x0, p.x0 + p.n - 1];
   let view = full;
@@ -1138,6 +1226,7 @@ function drawSpectrum() {
     calPoints: state.points.map((q) => ({ px: q.off + state.W / 2 })),
     refLines,
     peaks,
+    features: state.features.map((f) => ({ px: f.px, tag: f.tag })),
     yLabel: s.normalise ? 'Relative signal' : 'Signal',
   });
 }
@@ -1154,6 +1243,8 @@ function buildReadout() {
   ro.px = document.createElement('span');
   ro.vals.appendChild(ro.pos);
   ro.vals.appendChild(ro.px);
+  ro.feat = document.createElement('span');   // the labelled feature under the cursor, before the values
+  ro.vals.appendChild(ro.feat);
   for (const [name, cls] of [['sum', 'k'], ['r', 'k kR'], ['g', 'k kG'], ['b', 'k kB']]) {
     const key = document.createElement('span');
     key.className = cls;
@@ -1184,6 +1275,8 @@ function updateReadout() {
   ro.r.textContent = (p.r[i] * k).toFixed(3);
   ro.g.textContent = (p.g[i] * k).toFixed(3);
   ro.b.textContent = (p.b[i] * k).toFixed(3);
+  const f = featureAt(state.cursorPx);
+  ro.feat.textContent = f ? `  ${f.tag}, ${f.lines.map((l) => l.what).filter((v, j, a) => a.indexOf(v) === j).join('; ')} ` : '';
 }
 
 function rangeText(a, b) {
@@ -1278,7 +1371,6 @@ function updateButtons() {
   els.btnFreeze.textContent = state.frozen ? 'Back to live' : 'Capture';
   els.bigCapture.textContent = state.frozen ? 'Back to live' : 'Capture';
   els.btnBig.disabled = !on;
-  els.btnFocus.disabled = !on;
   els.btnFlip.setAttribute('aria-pressed', String(!!state.settings.flip));
   els.ovRotate.hidden = !state.W;
   els.ovBig.hidden = !on || state.big;
@@ -1304,6 +1396,8 @@ function syncControls() {
   els.refLines.value = s.refLines;
   els.autoSource.value = AUTO_SOURCES.includes(s.autoSource) ? s.autoSource : 'lamp';
   els.colourWb.value = core.WHITE_BALANCES.some((w) => w.id === s.colourWb) ? s.colourWb : 'd65';
+  els.btnLabels.setAttribute('aria-pressed', String(!!s.labelFeatures));
+  state.featureKey = null;
   updateColourBox();
   for (const id of ['follow', 'bigOnStart', 'keepFixed']) els[id].checked = !!s[id];
   els.name.value = s.name;
@@ -1372,8 +1466,6 @@ function wire() {
   els.bigCapture.addEventListener('click', toggleFreeze);
   els.bigFind.addEventListener('click', findSpectrum);
   els.btnFind.addEventListener('click', findSpectrum);
-  els.bigFocus.addEventListener('click', focusOnBand);
-  els.btnFocus.addEventListener('click', focusOnBand);
   els.bigExit.addEventListener('click', () => setBig(false));
   els.ovBig.addEventListener('click', () => setBig(true));
   els.btnBig.addEventListener('click', () => setBig(true));
@@ -1399,8 +1491,8 @@ function wire() {
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   };
 
-  // drag on the picture to move the band; while live, a tap also focuses there if the camera allows
-  let dragging = false, downAt = null;
+  // drag on the picture to move the band
+  let dragging = false;
   const moveBand = (e) => {
     const f = state.viewFit;
     if (!f) return;
@@ -1412,7 +1504,6 @@ function wire() {
   els.view.addEventListener('pointerdown', (e) => {
     if (!state.viewFit) return;
     dragging = true;
-    downAt = local(e, els.view);
     try { els.view.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     if (state.settings.follow && isLive()) {
       setSetting('follow', false);
@@ -1423,14 +1514,7 @@ function wire() {
     e.preventDefault();
   });
   els.view.addEventListener('pointermove', (e) => { if (dragging) moveBand(e); });
-  els.view.addEventListener('pointerup', (e) => {
-    if (!dragging) return;
-    dragging = false;
-    const f = state.viewFit, p = local(e, els.view);
-    if (f && downAt && Math.hypot(p.x - downAt.x, p.y - downAt.y) < 12 && isLive()) {
-      focusAt(core.clamp((p.x - f.dx) / f.k / state.W, 0, 1), core.clamp((p.y - f.dy) / f.k / state.H, 0, 1), true);
-    }
-  });
+  els.view.addEventListener('pointerup', () => { dragging = false; });
   els.view.addEventListener('pointercancel', () => { dragging = false; });
 
   // touch the plot to place the cursor; it snaps when the finger lifts
@@ -1497,7 +1581,8 @@ function wire() {
   els.btnKeepLine.addEventListener('click', keepOrForgetLine);
   els.btnAddPoint.addEventListener('click', addPoint);
   els.btnAuto.addEventListener('click', runAuto);
-  els.autoSource.addEventListener('change', () => { setSetting('autoSource', els.autoSource.value); updateColourBox(); });
+  els.btnLabels.addEventListener('click', () => setLabels(!state.settings.labelFeatures));
+  els.autoSource.addEventListener('change', () => { setSetting('autoSource', els.autoSource.value); updateColourBox(); state.featureKey = null; });
   els.colourWb.textContent = '';
   for (const w of core.WHITE_BALANCES) { const o = document.createElement('option'); o.value = w.id; o.textContent = w.name; els.colourWb.appendChild(o); }
   els.colourWb.addEventListener('change', () => setSetting('colourWb', els.colourWb.value));
@@ -1539,12 +1624,13 @@ function wire() {
   if (window.ResizeObserver) {
     const obs = new ResizeObserver(() => requestRender());
     obs.observe(els.viewWrap); obs.observe(els.plotWrap);
+    new ResizeObserver(() => renderCalPlot()).observe(els.calPlotWrap);
   }
   window.addEventListener('resize', () => { applyScreenTurn(); requestRender(); });
   window.addEventListener('orientationchange', () => { applyScreenTurn(); setTimeout(applyScreenTurn, 300); });
   if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', applyScreenTurn);
   const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
-  if (mq && mq.addEventListener) mq.addEventListener('change', () => { colorCache = null; requestRender(); });
+  if (mq && mq.addEventListener) mq.addEventListener('change', () => { colorCache = null; requestRender(); renderCalPlot(); });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') return;
     if (state.stream && state.track && state.track.readyState === 'ended') onTrackEnded();
@@ -1557,6 +1643,7 @@ function selectTab(name) {
   document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
   document.querySelectorAll('.panel').forEach((p) => { p.hidden = p.dataset.panel !== name; });
   if (name === 'more') els.diag.textContent = diagnostics();
+  if (name === 'calibrate') renderCalPlot();
   requestRender();
 }
 
@@ -1609,6 +1696,10 @@ function settingsRecord() {
       rms_nm: cal.ok ? cal.rms : null,
       automatic: state.autoInfo,
     },
+    labelled_features: state.features.map((f) => ({
+      label: f.tag, nm: Math.round(f.nm * 10) / 10, pixel: Math.round(f.px * 10) / 10,
+      lines: f.lines.map((l) => ({ nm: l.nm, name: l.name, cause: l.what })),
+    })),
   };
 }
 

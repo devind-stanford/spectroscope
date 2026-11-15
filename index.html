@@ -61,7 +61,6 @@
     <div class="bigBar" id="bigBar">
       <button type="button" class="btn primary" id="bigCapture">Capture</button>
       <button type="button" class="btn" id="bigFind">Find spectrum</button>
-      <button type="button" class="btn" id="bigFocus">Focus</button>
       <button type="button" class="btn" id="bigRotate">&#10227; 90&deg;</button>
       <button type="button" class="btn" id="bigExit">Controls</button>
     </div>
@@ -85,8 +84,8 @@
       <div class="row buttons">
         <button type="button" class="btn" id="btnBig" disabled>Big camera view</button>
         <button type="button" class="btn" id="btnFind">Find spectrum</button>
-        <button type="button" class="btn" id="btnFocus" disabled>Focus</button>
       </div>
+      <p class="note">Find spectrum places the band on the spectrum and turns the picture (Tilt) so the spectrum runs straight across.</p>
       <label class="check"><input type="checkbox" id="bigOnStart"> Open the camera in big view</label>
       <label class="check"><input type="checkbox" id="keepFixed"> Keep the screen and picture fixed when the phone turns</label>
       <div class="row field" id="cameraRow" hidden>
@@ -116,7 +115,7 @@
       <div class="row slider">
         <label for="tilt">Tilt</label>
         <button type="button" class="step" data-for="tilt" data-dir="-1" aria-label="Less tilt">&minus;</button>
-        <input type="range" id="tilt" min="-10" max="10" step="0.1" value="0">
+        <input type="range" id="tilt" min="-45" max="45" step="0.1" value="0">
         <button type="button" class="step" data-for="tilt" data-dir="1" aria-label="More tilt">+</button>
         <output id="tiltOut" for="tilt">0.0&deg;</output>
       </div>
@@ -170,6 +169,10 @@
 
     <div class="panel" data-panel="calibrate" role="tabpanel" hidden>
       <p class="fit" id="fitSummary">No lines marked yet.</p>
+      <div class="calPlotWrap" id="calPlotWrap" hidden>
+        <canvas id="calPlot" aria-label="The calibration: wavelength, departure from a straight line, and nanometres per pixel, against pixel column"></canvas>
+      </div>
+      <p class="note" id="calPlotNote" hidden></p>
       <h2>Automatic</h2>
       <div class="row field">
         <label for="autoSource">Light</label>
@@ -192,8 +195,12 @@
       </div>
       <div class="row buttons">
         <button type="button" class="btn primary" id="btnAuto">Auto-calibrate</button>
+        <button type="button" class="btn" id="btnLabels" aria-pressed="false">Label features</button>
       </div>
-      <p class="note" id="autoStatus">Point the spectroscope at the light and put the band on the whole spectrum, violet to red. Auto-calibrate then finds the known lines (or, for any white light, the places where blue turns green and green turns red) and lists them below, where they can be checked, removed or added to.</p>
+      <p class="note" id="autoStatus">Point the spectroscope at the light and put the band on the whole spectrum, violet to red. Auto-calibrate then finds the known lines (or, for any white light, the places where blue turns green and green turns red) and lists them below, where they can be checked, removed or added to. Label features names the atoms and molecules that make the lines of sunlight or a fluorescent lamp.</p>
+      <h2 id="featureHead" hidden>Features labelled on the plot</h2>
+      <ul class="features" id="featureList" hidden></ul>
+      <p class="note" id="featureNote" hidden></p>
       <h2>By hand</h2>
       <ol class="steps">
         <li>Tap the plot on a line you recognise. Use the arrows under the plot for single pixels.</li>

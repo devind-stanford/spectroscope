@@ -9,7 +9,7 @@
 //   - Polynomial coefficients are stored highest power first:
 //     wavelength_nm = c[0] * offset^2 + c[1] * offset + c[2]   (or c[0] * offset + c[1]).
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -99,7 +99,9 @@ export function bandEdges(rows, centre) {
 /** Find the spectrum in a small RGBA copy of the frame (w x h pixels): the colourful band, which
  *  the white zero order and grey stray light are not. Returns null when nothing colourful stands
  *  out, { vertical: true } when the band runs up and down, or the band's box as fractions of the
- *  frame: { vertical: false, x0, x1, y0, y1 } (x1, y1 exclusive). */
+ *  frame: { vertical: false, x0, x1, y0, y1, angle } (x1, y1 exclusive). angle is the slope of the
+ *  band in degrees, positive when it runs down to the right, or null when the band is too short
+ *  and wide to tell. */
 export function findSpectrumBox(data, w, h) {
   const n = w * h, score = new Uint8Array(n), hist = new Uint32Array(256);
   for (let i = 0, p = 0; i < n; i++, p += 4) {
@@ -113,6 +115,25 @@ export function findSpectrumBox(data, w, h) {
   for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= 0.005 * n) { top = v; break; } }
   if (top < 20) return null;
   const thr = Math.max(12, 0.25 * top);
+  // slope of the band: the long axis of the colourful pixels, each weighted by its colourfulness
+  let m0 = 0, mx = 0, my = 0;
+  for (let y = 0, i = 0; y < h; y++) for (let x = 0; x < w; x++, i++) if (score[i] >= thr) { m0 += score[i]; mx += score[i] * x; my += score[i] * y; }
+  let angle = null;
+  if (m0 > 0) {
+    mx /= m0; my /= m0;
+    let cxx = 0, cyy = 0, cxy = 0;
+    for (let y = 0, i = 0; y < h; y++) {
+      for (let x = 0; x < w; x++, i++) {
+        if (score[i] < thr) continue;
+        const v = score[i], dx = x - mx, dy = y - my;
+        cxx += v * dx * dx; cyy += v * dy * dy; cxy += v * dx * dy;
+      }
+    }
+    const tr = 0.5 * (cxx + cyy), root = Math.sqrt(Math.max(0, tr * tr - (cxx * cyy - cxy * cxy)));
+    const long = tr + root, short = tr - root;
+    // trusted only for a band at least three times longer than it is wide
+    if (long > 9 * Math.max(short, 1e-9 * long)) angle = 0.5 * Math.atan2(2 * cxy, cxx - cyy) * 180 / Math.PI;
+  }
   const rows = new Float64Array(h), cols = new Float64Array(w);
   for (let y = 0, i = 0; y < h; y++) {
     for (let x = 0; x < w; x++, i++) {
@@ -170,7 +191,7 @@ export function findSpectrumBox(data, w, h) {
   for (let x = xp - 1, miss = 0; x >= 0; x--) { if (on(x)) { xa = x; miss = 0; } else if (++miss > gap) break; }
   for (let x = xp + 1, miss = 0; x < w; x++) { if (on(x)) { xb = x; miss = 0; } else if (++miss > gap) break; }
   if (xb - xa < 4) return null;
-  return { vertical: false, x0: xa / w, x1: (xb + 1) / w, y0: y0 / h, y1: (y1 + 1) / h };
+  return { vertical: false, x0: xa / w, x1: (xb + 1) / w, y0: y0 / h, y1: (y1 + 1) / h, angle };
 }
 
 /** Gaussian blur of a 1-D array (edges repeat the end value). sigma in samples. */
@@ -581,8 +602,10 @@ function fitMap(pairs) {
 }
 
 /** Calibrate from a fluorescent lamp: try every pair of detected peaks as every pair of lamp
- *  lines, keep the straight-line guess that explains the most peaks, then refine. */
-export function autoCalibrateLamp(y, x0, W) {
+ *  lines, keep the straight-line guess that explains the most peaks, then refine. When two
+ *  different guesses explain the peaks about equally well, the colours decide (opts.rgb: the
+ *  linear R, G, B profile; opts.colourRef: see colourJudge). */
+export function autoCalibrateLamp(y, x0, W, opts = {}) {
   const fail = (message, extra = {}) => ({ ok: false, points: [], message, warnings: [], reversed: false, ...extra });
   const { peaks } = lampPeaks(y);
   if (peaks.length < 3) return fail('Too few bright lines. Point the spectroscope at a fluorescent lamp (LED lights have no lines) and place the band on the spectrum.');
@@ -608,11 +631,28 @@ export function autoCalibrateLamp(y, x0, W) {
   }
   if (!hyps.length) return fail('No set of peaks matches the lamp pattern. Check that the light is a fluorescent lamp and that the band covers the whole spectrum.');
   hyps.sort((p, q) => q.score - p.score);
-  const best = hyps[0];
+  let best = hyps[0];
   const xmid = 0.5 * (peaks[0].x + peaks[peaks.length - 1].x);
-  const rival = hyps.find((h) => Math.abs(h.map(xmid) - best.map(xmid)) > 8 || Math.abs(h.s / best.s - 1) > 0.06);
+  const distinct = (h, b) => Math.abs(h.map(xmid) - b.map(xmid)) > 8 || Math.abs(h.s / b.s - 1) > 0.06;
+  const rival = hyps.find((h) => distinct(h, best));
+  let colourNote = '', colourMis = null;
+  const judge = colourJudge(opts.rgb, opts.colourRef);
   if (rival && rival.score > 0.92 * best.score && rival.n >= best.n) {
-    return fail('Two different matches fit the lamp lines about equally well. Widen the band to include the whole spectrum, or mark the lines by hand.');
+    // a tie: each line has its own colour, so the colours tell which guess is right
+    const near = [];
+    for (const h of hyps) {
+      if (h.score < 0.92 * best.score || near.length >= 4) break;
+      if (near.every((q) => distinct(h, q))) near.push(h);
+    }
+    const ranked = judge ? near.map((h) => ({ h, mis: judge(h.map) })).filter((q) => q.mis !== null).sort((p, q) => p.mis - q.mis) : [];
+    const free = freeMismatch(opts.colourRef);
+    if (ranked.length >= 2 && ranked[0].mis <= 1.5 * free && ranked[1].mis > Math.max(free, ranked[0].mis + 0.05)) {
+      best = ranked[0].h;
+      colourMis = ranked[0].mis;
+      colourNote = ' Another match fitted the lines about as well, but its colours were wrong; the colours chose this one.';
+    } else {
+      return fail(`Two different matches fit the lamp lines about equally well${judge ? ', and their colours could not tell them apart' : ''}. Widen the band to include the whole spectrum, or mark the lines by hand.`);
+    }
   }
   if (best.s < 0) return fail('The spectrum runs from red on the left to blue on the right. Tap Flip left-right in the Source tab, then try again.', { reversed: true });
 
@@ -632,11 +672,12 @@ export function autoCalibrateLamp(y, x0, W) {
   }
   const warnings = [];
   if (matches.length === 3) warnings.push('Only three lamp lines were found, so the fit is a straight line. Check the marked lines against the plot.');
+  if (judge && colourMis === null) colourMis = judge(map);
   return {
     ok: true, reversed: false, warnings,
     points: matches.map((m) => ({ off: x0 + peaks[m.pi].x - W / 2, nm: LAMP_LINES[m.li].nm, src: 'lamp' })),
-    lines: matches.length,
-    message: `Found ${matches.length} lamp lines: ${nms.map((v) => v.toFixed(1)).join(', ')} nm.`,
+    lines: matches.length, colourMismatch: colourMis, coloursDecided: !!colourNote,
+    message: `Found ${matches.length} lamp lines: ${nms.map((v) => v.toFixed(1)).join(', ')} nm.${colourNote}`,
   };
 }
 
@@ -716,8 +757,10 @@ function nelderMead(f, start, steps, iters = 300) {
 
 /** Calibrate from sunlight or sky light: slide and stretch a reference sunlight spectrum over the
  *  measured curve until their dark lines line up best, then refine with a gentle curvature.
- *  solar: { start, step, values } on a 1 nm grid (see solar.js). */
-export function autoCalibrateSun(y, x0, W, solar) {
+ *  solar: { start, step, values } on a 1 nm grid (see solar.js). opts.rgb (the linear R, G, B
+ *  profile) and opts.colourRef (see colourJudge) let the colours rule out matches that put the
+ *  columns at the wrong wavelengths, which settles ties between different matches. */
+export function autoCalibrateSun(y, x0, W, solar, opts = {}) {
   const fail = (message, extra = {}) => ({ ok: false, points: [], message, warnings: [], reversed: false, ...extra });
   const n = y.length;
   let ymax = 0;
@@ -779,43 +822,93 @@ export function autoCalibrateSun(y, x0, W, solar) {
     }
   }
   if (!results.length) return fail('The spectrum could not be compared with sunlight.');
-  results.sort((p, q) => q.r - p.r);
-  const best = results[0];
-  // the best answer that is clearly different from the winner (another place or another scale)
-  const rival = results.find((h) => h.rev !== best.rev || Math.abs((h.c + h.s * nLit / 2) - (best.c + best.s * nLit / 2)) > 10 || Math.abs(h.s / best.s - 1) > 0.08);
-  if (best.rev) return fail('The spectrum runs from red on the left to blue on the right. Tap Flip left-right in the Source tab, then try again.', { reversed: true, r: best.r });
+  const notFound = (v) => `The dark lines of sunlight could not be found (match ${v.toFixed(2)}). Point at blue sky or a white sheet in sunlight, keep Peak below 90 %, and try again.`;
+  // Keep the answers that put the lit part where a camera sees light (starting at 340-460 nm and
+  // ending at 600-820 nm): elsewhere a pattern of dips matches by chance about as well.
+  const hiOf = (h) => h.c + h.s * (nLit - 1);
+  const ok = results.filter((h) => h.c >= 335 && h.c <= 465 && hiOf(h) >= 595 && hiOf(h) <= 825);
+  ok.sort((p, q) => q.r - p.r);
+  if (!ok.length || !(ok[0].r > 0.2)) return fail(notFound(ok.length ? ok[0].r : 0));
+  // the best of each clearly different answer (another place or another scale)
+  const midOf = (h) => h.c + h.s * nLit / 2;
+  const apart = (h, q) => Math.abs(midOf(h) - midOf(q)) > 10 || Math.abs(h.s / q.s - 1) > 0.08;
+  const cands = [];
+  for (const h of ok) {
+    if (h.r < ok[0].r - 0.15 || cands.length >= 5) break;
+    if (cands.every((q) => apart(h, q))) cands.push(h);
+  }
+  // Colours: every wavelength has its own shares of R, G and B, so an answer that puts the columns
+  // at the wrong wavelengths also gets their colours wrong. A clear colour mismatch counts
+  // against an answer (see colourJudge); a small one, which any camera has, does not.
+  const judge = colourJudge(opts.rgb, opts.colourRef);
+  const free = freeMismatch(opts.colourRef);
+  const penalty = (mis) => (mis === null ? 0 : 2 * Math.max(0, mis - free));
+  for (const h of cands) {
+    h.mis = judge ? judge((i) => h.c + h.s * (i - first)) : null;
+    h.score = h.r - penalty(h.mis);
+  }
+  cands.sort((p, q) => q.score - p.score);
 
   // refine on the pixel grid: wavelength = a0 + a1 u + a2 u^2, with u = -1..1 across the lit part
   const mid = 0.5 * (first + last), half = 0.5 * (last - first);
-  const ysm = 0.6 / best.s > 0.5 ? gaussianSmooth(y, 0.6 / best.s) : y;
-  const hpPx = highPass(ysm, w, HP_NM / best.s);
-  const wPx = window(w, fullA + EDGE_NM / best.s, fullB - EDGE_NM / best.s);
-  let fit = null;
-  for (const fwhm of [4, 5.5, 8]) {
-    const t = fwhm === 5.5 ? tpl : tplFor(fwhm);
+  const mapOf = ([a0, a1, a2]) => (x) => { const u = (x - mid) / half; return a0 + a1 * u + a2 * u * u; };
+  const tpls = { 5.5: tpl };
+  const tplAt = (fwhm) => tpls[fwhm] || (tpls[fwhm] = tplFor(fwhm));
+  const refine = (h) => {
+    const ysm = 0.6 / h.s > 0.5 ? gaussianSmooth(y, 0.6 / h.s) : y;
+    const hpPx = highPass(ysm, w, HP_NM / h.s);
+    const wPx = window(w, fullA + EDGE_NM / h.s, fullB - EDGE_NM / h.s);
     const tmp = new Float64Array(n);
-    const cost = (p) => {
-      const [a0, a1, a2] = p;
-      if (!(Math.abs(a2) < 0.45 * Math.abs(a1))) return 2;
-      for (let i = first; i <= last; i++) { const u = (i - mid) / half; tmp[i] = interp1(t, (a0 + a1 * u + a2 * u * u - T0) / solar.step); }
-      return -wcorr(hpPx, tmp, wPx, first, last).r + 0.002 * (a2 / 5) ** 2;
+    const corr = (t, p) => {
+      const lam = mapOf(p);
+      for (let i = first; i <= last; i++) tmp[i] = interp1(t, (lam(i) - T0) / solar.step);
+      return wcorr(hpPx, tmp, wPx, first, last).r;
     };
-    const start = [best.c + best.s * (mid - first), best.s * half, 0];
-    const r = nelderMead(cost, start, [1.5, 0.02 * start[1], 1.5], 400);
-    if (!fit || r.f < fit.f) fit = { ...r, fwhm };
+    let fit = null;
+    for (const fwhm of [4, 5.5, 8]) {
+      const t = tplAt(fwhm);
+      const cost = (p) => (Math.abs(p[2]) < 0.45 * Math.abs(p[1]) ? -corr(t, p) + 0.002 * (p[2] / 5) ** 2 : 2);
+      const start = [h.c + h.s * (mid - first), h.s * half, 0];
+      const r = nelderMead(cost, start, [1.5, 0.02 * start[1], 1.5], 400);
+      if (!fit || r.f < fit.f) fit = { ...r, fwhm };
+    }
+    const lam = mapOf(fit.x);
+    return { h, x: fit.x, r: -fit.f, fwhm: fit.fwhm, lam, lo: lam(first), hi: lam(last), ysm };
+  };
+  const refined = [];
+  for (const h of cands) {
+    if (refined.length >= 3 || h.score < cands[0].score - 0.1) break;
+    const f = refine(h);
+    f.mis = judge ? judge(f.lam) : null;
+    f.score = f.r - penalty(f.mis);
+    f.plausible = f.lo >= 340 && f.lo <= 460 && f.hi >= 600 && f.hi <= 820;
+    refined.push(f);
   }
-  const [a0, a1, a2] = fit.x;
-  const r = -fit.f;
-  const debug = { best, rival: rival || null, refined: { a0, a1, a2, r, fwhm: fit.fwhm, first, last } };
-  if (r < 0.3) return fail(`The dark lines of sunlight could not be found (match ${r.toFixed(2)}). Point at blue sky or a white sheet in sunlight, keep Peak below 90 %, and try again.`, { r, debug });
-  if (rival && rival.r > best.r - 0.03) {
-    return fail(`Two different matches fit sunlight about equally well (${best.r.toFixed(2)} and ${rival.r.toFixed(2)}). Widen the band to include the whole spectrum and try again.`, { r, debug });
+  const round3 = (v) => (v === null || v === undefined ? null : Math.round(v * 1000) / 1000);
+  const debug = {
+    first, last,
+    candidates: cands.map((h) => ({ r: round3(h.r), s: round3(h.s), lo: h.c, hi: Math.round(hiOf(h)), mis: round3(h.mis), score: round3(h.score) })),
+    refined: refined.map((f) => ({ r: round3(f.r), lo: Math.round(f.lo), hi: Math.round(f.hi), x: f.x, fwhm: f.fwhm, mis: round3(f.mis), score: round3(f.score) })),
+  };
+  const good = refined.filter((f) => f.plausible).sort((p, q) => q.score - p.score);
+  if (!good.length) {
+    const f = refined[0];
+    return fail(`The best sunlight match puts the spectrum at ${f.lo.toFixed(0)}-${f.hi.toFixed(0)} nm, which is not plausible. Is this sunlight?`, { r: f.r, debug });
   }
-  const lamAt = (x) => { const u = (x - mid) / half; return a0 + a1 * u + a2 * u * u; };
-  const lo = lamAt(first), hi = lamAt(last);
-  if (lo < 340 || lo > 460 || hi < 600 || hi > 820) {
-    return fail(`The best sunlight match puts the spectrum at ${lo.toFixed(0)}-${hi.toFixed(0)} nm, which is not plausible. Is this sunlight?`, { r, debug });
+  const win = good[0];
+  const r = win.r;
+  if (r < 0.3) return fail(notFound(r), { r, debug });
+  const differs = (f) => Math.abs(f.lam(mid) - win.lam(mid)) > 5 || Math.abs(f.x[1] / win.x[1] - 1) > 0.05;
+  // without colours, a tie is judged on the coarse match alone, as before colours were used
+  const rival = judge ? good.find((f) => f !== win && differs(f)) : cands.find((h) => h !== win.h);
+  if (rival && (judge ? rival.score > win.score - 0.03 : rival.r > win.h.r - 0.03)) {
+    return fail(`Two different matches fit sunlight about equally well (${(judge ? win.r : win.h.r).toFixed(2)} and ${rival.r.toFixed(2)})${judge ? ', and their colours could not tell them apart' : ''}. Widen the band to include the whole spectrum and try again.`, { r, debug });
   }
+  // an answer that matched the dark lines about as well (or better) and lost on its colours
+  const beaten = cands.find((h) => h !== win.h && h.r > win.h.r - 0.03) || good.find((f) => f !== win && differs(f) && f.r > win.r - 0.03);
+  const coloursDecided = !!(judge && beaten);
+  const [a0, a1, a2] = win.x;
+  const lamAt = win.lam, lo = win.lo, hi = win.hi, ysm = win.ysm, sWin = win.h.s;
   const xOf = (nm) => {
     // invert the quadratic on the branch inside the lit range
     if (Math.abs(a2) < 1e-12) return mid + half * (nm - a0) / a1;
@@ -829,7 +922,7 @@ export function autoCalibrateSun(y, x0, W, solar) {
   // through them, as for lamp lines. Each feature's wavelength is where the reference spectrum,
   // blurred to the same resolution, has its dip (blended lines move at low resolution), so both
   // sides are measured the same way.
-  const tb = gaussianSmooth(tv, fit.fwhm / 2.355 / solar.step);
+  const tb = gaussianSmooth(tv, win.fwhm / 2.355 / solar.step);
   const found = [];
   for (const nm of SUN_MARKS) {
     const tp = snapFeature(tb, (nm - T0) / solar.step, 'dip', 6 / solar.step, 0.5);
@@ -837,7 +930,7 @@ export function autoCalibrateSun(y, x0, W, solar) {
     const eff = T0 + tp.pos * solar.step;
     const xp = xOf(eff);
     if (xp === null || xp < first || xp > last) continue;
-    const op = snapFeature(ysm, xp, 'dip', 6 / best.s, 0.5);
+    const op = snapFeature(ysm, xp, 'dip', 6 / sWin, 0.5);
     if (!op.snapped || Math.abs(lamAt(op.pos) - eff) > 4) continue;
     found.push({ x: op.pos, nm: Math.round(eff * 10) / 10, catalogue: nm });
   }
@@ -869,9 +962,15 @@ export function autoCalibrateSun(y, x0, W, solar) {
   }
   if (points.length < 3) return fail('Too little of the spectrum is lit to calibrate from sunlight.', { r });
   if (r < 0.45) warnings.push('The match is weak. Check the marked lines against the dark lines in the plot.');
+  if (judge && win.mis !== null && win.mis > free) {
+    warnings.push(`The colours fit this calibration only roughly (they differ by ${win.mis.toFixed(2)} from ${opts.colourRef.kind === 'model' ? 'a standard camera' : 'the kept colours'}). Check the marked lines against the dark lines in the plot.`);
+  }
+  const colourText = coloursDecided
+    ? ` Another match fitted the dark lines about as well (${beaten.r.toFixed(2)}) but put the colours at the wrong wavelengths, so the colours chose this one.` : '';
   return {
-    ok: true, reversed: false, warnings, points, r, fwhm: fit.fwhm, lines: points.length, debug: { ...debug, found },
-    message: `Matched the sunlight pattern (match ${r.toFixed(2)} out of 1) and found ${points.length} dark lines between ${lo.toFixed(0)} and ${hi.toFixed(0)} nm.`,
+    ok: true, reversed: false, warnings, points, r, fwhm: win.fwhm, lines: points.length,
+    colourMismatch: win.mis, coloursDecided, debug: { ...debug, found, a: [a0, a1, a2] },
+    message: `Matched the sunlight pattern (match ${r.toFixed(2)} out of 1) and found ${points.length} dark lines between ${lo.toFixed(0)} and ${hi.toFixed(0)} nm.${colourText}`,
   };
 }
 
@@ -997,6 +1096,43 @@ function refCrossings(ref) {
 
 const COLOUR_WINDOW = [450, 630];   // nm compared when refining: where colours change the most
 
+/** Mean squared difference between a profile's colour shares (sh, from profileShares) and a
+ *  reference's, over 450-630 nm, when profile column i has wavelength lamAt(i). null when too
+ *  little lit profile falls in that range. */
+function shareCost(sh, ref, lamAt, i0 = 0, i1 = sh.w.length - 1) {
+  const L = ref.r.length;
+  let sw = 0, acc = 0;
+  for (let i = i0; i <= i1; i++) {
+    if (!(sh.w[i] > 0)) continue;
+    const nm = lamAt(i);
+    if (!(nm >= COLOUR_WINDOW[0] && nm <= COLOUR_WINDOW[1])) continue;
+    const pos = (nm - ref.start) / ref.step;
+    if (pos < 0 || pos > L - 1) continue;
+    const v = sh.w[i] * interp1(ref.trust, pos);
+    if (!(v > 0)) continue;
+    const dr = interp1(ref.r, pos) - sh.fr[i], dg = interp1(ref.g, pos) - sh.fg[i], db = interp1(ref.b, pos) - sh.fb[i];
+    acc += v * (dr * dr + dg * dg + db * db); sw += v;
+  }
+  return sw >= 5 ? acc / sw : null;
+}
+
+/** A judge of wavelength maps by colour: returns f(lamAt) giving the typical difference of each
+ *  colour share from the reference (0 for a perfect match, about 0.03 for the same camera, 0.1 to
+ *  0.15 for a phone against the standard model, 0.3 and more for a map tens of nm off), or null
+ *  when the profile shows no clear blue, green and red to judge by. rgb: { r, g, b, clip } linear;
+ *  ref: from colourModel() or colourReferenceFrom(). */
+export function colourJudge(rgb, ref) {
+  if (!rgb || !ref || !rgb.r || rgb.r.length < 8) return null;
+  const sh = profileShares(rgb);
+  if (!(sh.top > 0) || colourCheck(sh.fr, sh.fg, sh.fb, sh.w).missing.length) return null;
+  return (lamAt) => { const c = shareCost(sh, ref, lamAt); return c === null ? null : Math.sqrt(c / 3); };
+}
+
+/** The colour difference (see colourJudge) still taken as agreement: what a right answer can show. */
+function freeMismatch(ref) {
+  return ref && ref.kind !== 'model' ? 0.08 : 0.18;
+}
+
 /** Calibrate from the colours of any light that has blue, green and red (a white LED, a torch, a
  *  bulb, daylight). rgb: { r, g, b, clip } per column, linear (sRGB curve undone). ref: from
  *  colourModel() or colourReferenceFrom(). The blue-green and green-red hand-overs give a first
@@ -1022,22 +1158,11 @@ export function autoCalibrateColour(rgb, x0, W, ref) {
   const s0 = (rc[1] - rc[0]) / (gr - bg);
   if (!(s0 >= SLOPE_RANGE[0] && s0 <= SLOPE_RANGE[1])) return fail('The colours give an implausible scale. Check that the band covers the spectrum.');
   const xm = 0.5 * (bg + gr), lm0 = 0.5 * (rc[0] + rc[1]);
-  const L = ref.r.length;
+  const sh = { fr, fg, fb, w };
   const cost = ([lm, s]) => {
     if (!(s > 0.7 * s0 && s < 1.4 * s0)) return 1;
-    let sw = 0, acc = 0;
-    for (let i = first; i <= last; i++) {
-      if (!(w[i] > 0)) continue;
-      const nm = lm + s * (i - xm);
-      if (nm < COLOUR_WINDOW[0] || nm > COLOUR_WINDOW[1]) continue;
-      const pos = (nm - ref.start) / ref.step;
-      if (pos < 0 || pos > L - 1) continue;
-      const v = w[i] * interp1(ref.trust, pos);
-      if (!(v > 0)) continue;
-      const dr = interp1(ref.r, pos) - fr[i], dg = interp1(ref.g, pos) - fg[i], db = interp1(ref.b, pos) - fb[i];
-      acc += v * (dr * dr + dg * dg + db * db); sw += v;
-    }
-    return sw >= 5 ? acc / sw : 1;
+    const c = shareCost(sh, ref, (i) => lm + s * (i - xm), first, last);
+    return c === null ? 1 : c;
   };
   const fit = nelderMead(cost, [lm0, s0], [2, 0.03 * s0], 300);
   const [lm, s] = fit.x;
@@ -1057,7 +1182,7 @@ export function autoCalibrateColour(rgb, x0, W, ref) {
     ok: true, reversed: false, warnings, lines: 2, mismatch,
     points: [{ off: x0 + bg - W / 2, nm: nmBg, src: 'colour' }, { off: x0 + gr - W / 2, nm: nmGr, src: 'colour' }],
     debug: { bg, gr, refCrossings: rc, seedSlope: s0, slope: s, lm, xm, first, last, lo, hi },
-    message: `Calibrated from the colours of ${ref.kind === 'model' ? ref.name : 'this camera, as kept'}: blue turns green at ${nmBg.toFixed(1)} nm and green turns red at ${nmGr.toFixed(1)} nm, ${s.toFixed(3)} nm per pixel, ${lo.toFixed(0)} to ${hi.toFixed(0)} nm across the lit part.`,
+    message: `Calibrated from the colours of ${ref.kind === 'model' ? ref.name : ref.camera ? `the ${ref.camera}, as kept` : 'this camera, as kept'}: blue turns green at ${nmBg.toFixed(1)} nm and green turns red at ${nmGr.toFixed(1)} nm, ${s.toFixed(3)} nm per pixel, ${lo.toFixed(0)} to ${hi.toFixed(0)} nm across the lit part.`,
   };
 }
 
@@ -1089,4 +1214,133 @@ export function colourReferenceFrom(rgb, nmAt, info = {}) {
   const ref = { start, step, ...out, kind: 'kept', ...info };
   if (!refCrossings(ref)) return fail('Blue turning green and green turning red were not both found. Use a white light, with the band on the whole spectrum.');
   return { ok: true, ref, crossings: refCrossings(ref) };
+}
+
+// ---------------------------------------------------------------- what makes the lines
+
+/** The atoms, ions and molecules behind the lines a spectroscope shows, wavelengths in air (nm).
+ *  Sunlight: dark lines absorbed in the Sun's atmosphere, and bands absorbed by oxygen and water
+ *  vapour in the Earth's air. Fluorescent lamp: bright lines of the mercury vapour in the tube and
+ *  of the terbium and europium ions in its phosphors. Lines closer than the spectroscope can
+ *  separate are labelled together. */
+export const FEATURES = {
+  sun: [
+    { nm: 393.4, tag: 'Ca⁺', name: 'K line', what: 'ionised calcium in the Sun' },
+    { nm: 396.8, tag: 'Ca⁺', name: 'H line', what: 'ionised calcium in the Sun' },
+    { nm: 410.2, tag: 'Hδ', name: 'hydrogen delta line', what: 'hydrogen in the Sun' },
+    { nm: 422.7, tag: 'Ca', name: 'g line', what: 'calcium in the Sun' },
+    { nm: 430.8, tag: 'CH', name: 'G band', what: 'CH molecules, with iron and calcium, in the Sun' },
+    { nm: 434.0, tag: 'Hγ', name: 'hydrogen gamma line', what: 'hydrogen in the Sun' },
+    { nm: 438.4, tag: 'Fe', name: 'e line', what: 'iron in the Sun' },
+    { nm: 486.1, tag: 'Hβ', name: 'hydrogen beta line (F)', what: 'hydrogen in the Sun' },
+    { nm: 495.8, tag: 'Fe', name: 'c line', what: 'iron in the Sun' },
+    { nm: 517.3, tag: 'Mg', name: 'b lines', what: 'magnesium (with some iron) in the Sun' },
+    { nm: 527.0, tag: 'Fe', name: 'E line', what: 'iron in the Sun' },
+    { nm: 589.3, tag: 'Na', name: 'D lines', what: 'sodium in the Sun' },
+    { nm: 627.7, tag: 'O₂', name: 'a band', what: 'oxygen in the Earth’s air' },
+    { nm: 656.3, tag: 'Hα', name: 'hydrogen alpha line (C)', what: 'hydrogen in the Sun' },
+    { nm: 687.2, tag: 'O₂', name: 'B band', what: 'oxygen in the Earth’s air' },
+    { nm: 718.5, tag: 'H₂O', name: 'water band', what: 'water vapour in the Earth’s air' },
+    { nm: 760.8, tag: 'O₂', name: 'A band', what: 'oxygen in the Earth’s air' },
+  ],
+  lamp: [
+    { nm: 404.7, tag: 'Hg', name: 'violet mercury line', what: 'mercury vapour in the tube' },
+    { nm: 435.8, tag: 'Hg', name: 'blue mercury line', what: 'mercury vapour in the tube' },
+    { nm: 487.7, tag: 'Tb', name: 'blue-green terbium line', what: 'terbium ions in the green phosphor' },
+    { nm: 543.5, tag: 'Tb', name: 'green terbium line', what: 'terbium ions in the green phosphor' },
+    { nm: 546.1, tag: 'Hg', name: 'green mercury line', what: 'mercury vapour in the tube' },
+    { nm: 578.0, tag: 'Hg', name: 'yellow mercury pair (577.0 and 579.1 nm, seen as one)', what: 'mercury vapour in the tube' },
+    { nm: 587.5, tag: 'Tb', name: 'yellow terbium line', what: 'terbium ions in the green phosphor, with some europium' },
+    { nm: 611.6, tag: 'Eu', name: 'red europium line', what: 'europium ions in the red phosphor' },
+    { nm: 621.0, tag: 'Tb', name: 'red terbium line', what: 'terbium ions in the green phosphor' },
+    { nm: 650.0, tag: 'Eu', name: 'deep red europium line', what: 'europium ions in the red phosphor' },
+    { nm: 707.5, tag: 'Eu', name: 'far red europium line', what: 'europium ions in the red phosphor' },
+  ],
+};
+
+/** The features of a calibrated spectrum and what causes them: the dark lines of sunlight
+ *  (kind 'sun') or the bright lines of a fluorescent lamp ('lamp'). y: the combined profile,
+ *  nmAt(i): wavelength of profile sample i, clip: fraction clipped per sample (optional; clipped
+ *  and dim columns are not judged). Each catalogue line takes the nearest dip or peak within a few
+ *  nm; lines that land on the same one are labelled together. Returns
+ *  [{ i, nm, tag, lines: [{ nm, tag, name, what }], strength }] sorted by position. */
+export function labelFeatures(y, nmAt, kind, clip = null) {
+  const cat = FEATURES[kind];
+  const n = y ? y.length : 0;
+  if (!cat || n < 16) return [];
+  const lam = new Float64Array(n);
+  for (let i = 0; i < n; i++) lam[i] = nmAt(i);
+  const step = Math.abs(lam[n - 1] - lam[0]) / (n - 1);
+  if (!(step > 0) || !Number.isFinite(step)) return [];
+  const ys = gaussianSmooth(y, Math.max(0.7, 0.5 / step));   // about 0.5 nm: keeps the lines, calms the noise
+  let top = 0;
+  for (let i = 0; i < n; i++) if (ys[i] > top) top = ys[i];
+  if (!(top > 0)) return [];
+  const usable = (i) => ys[i] > 0.08 * top && !(clip && clip[i] > 0.01);
+  const apart = Math.max(2, Math.round(1.2 / step));
+  let ext;
+  if (kind === 'lamp') {
+    ext = findPeaks(ys, { minProminence: 0.03 * top, minDistance: apart })
+      .filter((p) => usable(p.i)).map((p) => ({ x: refineExtremum(ys, p.i), strength: p.prominence / top }));
+  } else {
+    // dips against the local level, in log units, so a dip counts the same in dim and bright parts;
+    // not within 6 nm of a dim or clipped stretch, where the steep edge itself looks like a dip
+    const w = new Float64Array(n), edge = Math.ceil(6 / step);
+    for (let i = 0; i < n; i++) w[i] = usable(i) && ys[i] > 0.12 * top ? 1 : 0;
+    const hp = highPass(ys, w, 6 / step);
+    const inner = new Uint8Array(n);
+    for (let i = 0, run = 0; i < n; i++) { run = w[i] ? run + 1 : 0; inner[i] = run > edge ? 1 : 0; }
+    for (let i = n - 1, run = 0; i >= 0; i--) { run = w[i] ? run + 1 : 0; if (run <= edge) inner[i] = 0; }
+    const sm = gaussianSmooth(hp, 1.5);
+    const dev = [];
+    for (let i = 0; i < n; i++) if (w[i]) dev.push(Math.abs(hp[i] - sm[i]));
+    const noise = dev.length ? 1.4826 * median(dev) : 0;
+    const depth = new Float64Array(n);
+    for (let i = 0; i < n; i++) depth[i] = -hp[i];
+    ext = findPeaks(depth, { minProminence: Math.max(0.01, 3 * noise), minDistance: apart })
+      .filter((p) => inner[p.i]).map((p) => ({ x: refineExtremum(depth, p.i), strength: p.prominence }));
+  }
+  if (!ext.length) return [];
+  const lamAt = (x) => interp1(lam, x);
+  const tol = Math.max(2.5, 3 * step);
+  const lo = Math.min(lam[0], lam[n - 1]), hi = Math.max(lam[0], lam[n - 1]);
+  const claims = new Map();
+  for (const f of cat) {
+    if (f.nm < lo + 1 || f.nm > hi - 1) continue;
+    let bi = -1, bd = tol;
+    for (let k = 0; k < ext.length; k++) { const d = Math.abs(lamAt(ext[k].x) - f.nm); if (d < bd) { bd = d; bi = k; } }
+    if (bi < 0) continue;
+    if (!claims.has(bi)) claims.set(bi, []);
+    claims.get(bi).push(f);
+  }
+  const out = [];
+  for (const [k, fs] of claims) {
+    const tags = [...new Set(fs.map((f) => f.tag))];
+    out.push({ i: ext[k].x, nm: lamAt(ext[k].x), tag: tags.join('+'), lines: fs.map((f) => ({ ...f })), strength: ext[k].strength });
+  }
+  return out.sort((a, b) => a.i - b.i);
+}
+
+/** Full width at half height, in samples, of the peak at or next to sample i: measured above the
+ *  higher of the lowest points within maxHalf samples on either side. null when the peak does not
+ *  fall to half height on both sides. */
+export function peakWidth(y, i, maxHalf = 40) {
+  const n = y.length;
+  let c = clamp(Math.round(i), 0, n - 1);
+  for (let k = 0; k < maxHalf; k++) {   // climb to the top
+    if (c > 0 && y[c - 1] > y[c]) c--;
+    else if (c < n - 1 && y[c + 1] > y[c]) c++;
+    else break;
+  }
+  const a = Math.max(0, c - maxHalf), b = Math.min(n - 1, c + maxHalf);
+  let lmin = y[c], rmin = y[c];
+  for (let k = a; k < c; k++) lmin = Math.min(lmin, y[k]);
+  for (let k = c + 1; k <= b; k++) rmin = Math.min(rmin, y[k]);
+  const base = Math.max(lmin, rmin);
+  if (!(y[c] > base)) return null;
+  const half = base + 0.5 * (y[c] - base);
+  let L = null, R = null;
+  for (let k = c; k > a; k--) if (y[k - 1] <= half) { L = k - 1 + (half - y[k - 1]) / (y[k] - y[k - 1]); break; }
+  for (let k = c; k < b; k++) if (y[k + 1] <= half) { R = k + (y[k] - half) / (y[k] - y[k + 1]); break; }
+  return L === null || R === null ? null : R - L;
 }
