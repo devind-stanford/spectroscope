@@ -62,14 +62,33 @@ html, body {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* --app-h is the app's own height: the screen height normally, the screen width when the phone is
+   turned and the app is turned back (see html[data-turn] below) */
+:root { --app-h: 100vh; }
+@supports (height: 100dvh) { :root { --app-h: 100dvh; } }
+
 .app {
-  height: 100vh;
-  height: 100dvh;
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--app-h);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto auto auto minmax(0, 1fr);
   padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left);
 }
+
+/* phone turned sideways: turn the app back, so it stays as it was relative to the phone */
+html[data-turn="90"], html[data-turn="-90"] { --app-h: 100vw; }
+html[data-turn="90"] .app, html[data-turn="-90"] .app {
+  width: 100vh;
+  height: 100vw;
+  transform-origin: 0 0;
+  padding: max(env(safe-area-inset-left), env(safe-area-inset-right)) 0 env(safe-area-inset-bottom) 0;
+}
+html[data-turn="90"] .app { transform: translateY(100vh) rotate(-90deg); }
+html[data-turn="-90"] .app { transform: translateX(100vw) rotate(90deg); }
 
 .bar {
   display: flex;
@@ -96,8 +115,7 @@ html, body {
 
 .viewWrap {
   position: relative;
-  height: 21vh;
-  height: 21dvh;
+  height: calc(var(--app-h) * 0.21);
   min-height: 110px;
   background: #000;
   border-radius: 8px;
@@ -130,6 +148,63 @@ html, body {
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
+.viewBadge.warn { background: #fab219; color: #0b0b0b; }
+
+/* warnings: laid over the picture so nothing else moves; shown briefly after a capture */
+.notices {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 6px;
+  z-index: 2;
+}
+.notices .notice {
+  margin: 0 0 4px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(11, 11, 11, 0.82);
+  color: #f0efec;
+  font-size: 12.5px;
+}
+
+.viewTools {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+  z-index: 3;
+}
+.overlayBtn {
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 8px;
+  background: rgba(11, 11, 11, 0.6);
+  color: #f0efec;
+  font: inherit;
+  font-size: 13px;
+}
+.overlayBtn:active { background: rgba(60, 60, 60, 0.8); }
+
+.bigBar { display: none; }
+
+/* big camera view: the picture takes most of the screen, a small plot and large buttons below */
+.app.big { grid-template-rows: auto minmax(0, 1fr); }
+.app.big .tabs, .app.big .panels { display: none; }
+.app.big .stage { display: flex; flex-direction: column; min-height: 0; padding-bottom: env(safe-area-inset-bottom); }
+.app.big .viewWrap { flex: 1 1 auto; height: auto; min-height: 0; }
+.app.big .plotBox { flex: none; }
+.app.big .legend, .app.big .readout, .app.big .plotTools { display: none; }
+.app.big .plotWrap { height: calc(var(--app-h) * 0.15); min-height: 90px; }
+.app.big .bigBar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: 6px 0 8px;
+}
+.app.big .bigBar #bigCapture { grid-column: 1 / -1; min-height: 52px; font-size: 17px; }
+.app.big .bigBar .btn { min-height: 44px; padding: 0 4px; font-size: 14px; }
 
 .plotBox {
   margin-top: 6px;
@@ -175,7 +250,7 @@ html, body {
 .readout .kG { border-top-color: var(--series-g); }
 .readout .kB { border-top-color: var(--series-b); }
 
-.plotWrap { height: 24vh; height: 24dvh; min-height: 140px; }
+.plotWrap { height: calc(var(--app-h) * 0.24); min-height: 140px; }
 .plotWrap canvas { display: block; width: 100%; height: 100%; touch-action: none; }
 
 .plotTools { display: flex; align-items: center; gap: 6px; padding: 4px 8px 6px; }
@@ -194,14 +269,10 @@ html, body {
 .mini:active { background: var(--btn-press); }
 .row .mini { flex: none; min-height: 40px; min-width: 64px; }
 
-.notices { padding: 4px 4px 0; }
 .notice {
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  margin: 0 0 4px;
-  font-size: 13px;
-  color: var(--ink);
 }
 .notice .ico {
   flex: none;
@@ -215,7 +286,7 @@ html, body {
   line-height: 18px;
   text-align: center;
 }
-.notice.info .ico { background: var(--btn); color: var(--ink); border: 1px solid var(--border); line-height: 16px; }
+.notice.info .ico { background: #3a3a37; color: #f0efec; border: 1px solid rgba(255, 255, 255, 0.3); line-height: 16px; }
 
 .tabs {
   display: grid;
@@ -366,20 +437,18 @@ html, body {
 .hiddenInput { position: fixed; left: 0; top: 0; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 /* wide screens, and a phone held sideways: image and plot on the left, controls on the right */
-@media (min-width: 760px), (orientation: landscape) and (max-height: 520px) {
-  .app {
+/* tablets and computers: picture and plot on the left, controls on the right.
+   (A phone held sideways keeps its upright layout: see html[data-turn] above.) */
+@media (min-width: 760px) and (min-height: 560px) {
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) {
     grid-template-columns: minmax(0, 1.5fr) minmax(280px, 1fr);
     grid-template-rows: auto auto minmax(0, 1fr);
     column-gap: 4px;
   }
-  .bar { grid-column: 1 / -1; }
-  .stage { grid-column: 1; grid-row: 2 / 4; overflow-y: auto; padding-bottom: env(safe-area-inset-bottom); }
-  .tabs { grid-column: 2; grid-row: 2; margin-top: 0; border-top: 0; }
-  .panels { grid-column: 2; grid-row: 3; }
-  .viewWrap { height: 34vh; height: 34dvh; }
-  .plotWrap { height: 36vh; height: 36dvh; }
-}
-@media (orientation: landscape) and (max-height: 520px) {
-  .viewWrap { height: 27vh; height: 27dvh; min-height: 90px; }
-  .plotWrap { height: 33vh; height: 33dvh; min-height: 110px; }
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) .bar { grid-column: 1 / -1; }
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) .stage { grid-column: 1; grid-row: 2 / 4; overflow-y: auto; padding-bottom: env(safe-area-inset-bottom); }
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) .tabs { grid-column: 2; grid-row: 2; margin-top: 0; border-top: 0; }
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) .panels { grid-column: 2; grid-row: 3; }
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) .viewWrap { height: calc(var(--app-h) * 0.34); }
+  html:not([data-turn="90"]):not([data-turn="-90"]) .app:not(.big) .plotWrap { height: calc(var(--app-h) * 0.36); }
 }

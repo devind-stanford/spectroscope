@@ -29,8 +29,13 @@
   <section class="stage">
     <div class="viewWrap" id="viewWrap">
       <canvas id="view" aria-label="Camera image with the sampling band marked"></canvas>
-      <p id="viewHint" class="viewHint">Start the camera or load a photo. Then drag on the image to put the band on the spectrum.</p>
+      <p id="viewHint" class="viewHint">Start the camera or load a photo. The band finds the spectrum by itself, or drag on the picture to place it.</p>
+      <div id="notices" class="notices" aria-live="polite"></div>
       <span id="viewBadge" class="viewBadge" hidden></span>
+      <div class="viewTools">
+        <button type="button" class="overlayBtn" id="ovRotate" aria-label="Rotate the picture 90 degrees" hidden>&#10227; 90&deg;</button>
+        <button type="button" class="overlayBtn" id="ovBig" aria-label="Big camera view" hidden>Big view</button>
+      </div>
     </div>
 
     <div class="plotBox">
@@ -53,7 +58,13 @@
         <button type="button" class="mini wide" id="zoomFull">Full</button>
       </div>
     </div>
-    <div id="notices" class="notices" aria-live="polite"></div>
+    <div class="bigBar" id="bigBar">
+      <button type="button" class="btn primary" id="bigCapture">Capture</button>
+      <button type="button" class="btn" id="bigFind">Find spectrum</button>
+      <button type="button" class="btn" id="bigFocus">Focus</button>
+      <button type="button" class="btn" id="bigRotate">&#10227; 90&deg;</button>
+      <button type="button" class="btn" id="bigExit">Controls</button>
+    </div>
   </section>
 
   <nav class="tabs" role="tablist" aria-label="Controls">
@@ -68,9 +79,16 @@
     <div class="panel" data-panel="source" role="tabpanel">
       <div class="row buttons">
         <button type="button" class="btn primary" id="btnCamera">Start camera</button>
-        <button type="button" class="btn" id="btnFreeze" disabled>Freeze</button>
+        <button type="button" class="btn" id="btnFreeze" disabled>Capture</button>
         <button type="button" class="btn" id="btnPhoto">Load photo</button>
       </div>
+      <div class="row buttons">
+        <button type="button" class="btn" id="btnBig" disabled>Big camera view</button>
+        <button type="button" class="btn" id="btnFind">Find spectrum</button>
+        <button type="button" class="btn" id="btnFocus" disabled>Focus</button>
+      </div>
+      <label class="check"><input type="checkbox" id="bigOnStart"> Open the camera in big view</label>
+      <label class="check"><input type="checkbox" id="keepFixed"> Keep the screen and picture fixed when the phone turns</label>
       <div class="row field" id="cameraRow" hidden>
         <label for="cameraSelect">Camera</label>
         <select id="cameraSelect"></select>
@@ -136,6 +154,7 @@
         <button type="button" class="step" data-for="x1" data-dir="1" aria-label="Right edge further right">+</button>
         <output id="x1Out" for="x1"></output>
       </div>
+      <label class="check"><input type="checkbox" id="follow"> Keep the band on the spectrum while the camera is live</label>
       <label class="check"><input type="checkbox" id="linearise"> Undo the camera's brightness curve (sRGB gamma)</label>
       <label class="check"><input type="checkbox" id="subtractBg"> Subtract stray light, measured above and below the spectrum</label>
       <label class="check"><input type="checkbox" id="normalise"> Scale the plot so the tallest point is 1</label>
@@ -237,9 +256,9 @@
       <p class="note" id="version"></p>
     </div>
   </section>
+  <div id="toast" class="toast" role="status" hidden></div>
 </div>
 
-<div id="toast" class="toast" role="status" hidden></div>
 <video id="video" class="hiddenVideo" playsinline webkit-playsinline muted autoplay></video>
 <input type="file" id="file" accept="image/*" class="hiddenInput" tabindex="-1" aria-hidden="true">
 <script type="module" src="js/app.js"></script>

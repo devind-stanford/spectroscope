@@ -9,7 +9,7 @@
 //   - Polynomial coefficients are stored highest power first:
 //     wavelength_nm = c[0] * offset^2 + c[1] * offset + c[2]   (or c[0] * offset + c[1]).
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.3.0';
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -94,6 +94,83 @@ export function bandEdges(rows, centre) {
   let bottom = c;
   while (bottom < h - 1 && rows[bottom] >= threshold) bottom++;
   return { top, bottom, background: bg, peak };
+}
+
+/** Find the spectrum in a small RGBA copy of the frame (w x h pixels): the colourful band, which
+ *  the white zero order and grey stray light are not. Returns null when nothing colourful stands
+ *  out, { vertical: true } when the band runs up and down, or the band's box as fractions of the
+ *  frame: { vertical: false, x0, x1, y0, y1 } (x1, y1 exclusive). */
+export function findSpectrumBox(data, w, h) {
+  const n = w * h, score = new Uint8Array(n), hist = new Uint32Array(256);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const r = data[p], g = data[p + 1], b = data[p + 2];
+    const c = Math.max(r, g, b) - Math.min(r, g, b);
+    score[i] = c;
+    hist[c]++;
+  }
+  // how colourful the most colourful 0.5 % of the picture is
+  let acc = 0, top = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= 0.005 * n) { top = v; break; } }
+  if (top < 20) return null;
+  const thr = Math.max(12, 0.25 * top);
+  const rows = new Float64Array(h), cols = new Float64Array(w);
+  for (let y = 0, i = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, i++) {
+      if (score[i] >= thr) { rows[y] += score[i]; cols[x] += score[i]; }
+    }
+  }
+  const spread = (a) => {   // pixels holding the central 80 % of the colour
+    let tot = 0;
+    for (let i = 0; i < a.length; i++) tot += a[i];
+    if (!(tot > 0)) return 0;
+    let s = 0, lo = 0, hi = a.length - 1;
+    for (let i = 0; i < a.length; i++) { s += a[i]; if (s >= 0.1 * tot) { lo = i; break; } }
+    s = 0;
+    for (let i = a.length - 1; i >= 0; i--) { s += a[i]; if (s >= 0.1 * tot) { hi = i; break; } }
+    return hi - lo + 1;
+  };
+  if (spread(rows) > spread(cols)) return { vertical: true };
+
+  // rows: around the most colourful row, out to where colour falls below 30 % of it
+  const rs = gaussianSmooth(rows, 1);
+  let yp = 0;
+  for (let y = 1; y < h; y++) if (rs[y] > rs[yp]) yp = y;
+  let y0 = yp, y1 = yp;
+  while (y0 > 0 && rs[y0 - 1] >= 0.3 * rs[yp]) y0--;
+  while (y1 < h - 1 && rs[y1 + 1] >= 0.3 * rs[yp]) y1++;
+  // columns: colour inside those rows, including the dim violet and red ends, less the colour
+  // noise that video adds everywhere (measured in the rows away from the band)
+  let half = 0, med = 0;
+  for (let v = 0; v < 256; v++) { half += hist[v]; if (half >= 0.5 * n) { med = v; break; } }
+  const pix = Math.max(8, 2 * med + 4);
+  const cb = new Float64Array(w), bg = new Float64Array(w);
+  const m = y1 - y0 + 1;
+  let nb = 0;
+  for (let y = 0; y < h; y++) {
+    const inBand = y >= y0 && y <= y1;
+    const away = y < y0 - m || y > y1 + m;
+    if (!inBand && !away) continue;
+    if (away) nb++;
+    for (let x = 0, i = y * w; x < w; x++, i++) {
+      if (score[i] < pix) continue;
+      if (inBand) cb[x] += score[i]; else bg[x] += score[i];
+    }
+  }
+  if (nb > 0) {
+    const bgs = gaussianSmooth(bg, 3);
+    for (let x = 0; x < w; x++) cb[x] = Math.max(0, cb[x] - bgs[x] * m / nb);
+  }
+  const cs = gaussianSmooth(cb, 1.5);
+  let xp = 0;
+  for (let x = 1; x < w; x++) if (cs[x] > cs[xp]) xp = x;
+  if (!(cs[xp] > 0)) return null;
+  const on = (x) => cs[x] >= 0.06 * cs[xp];
+  const gap = Math.max(2, Math.round(0.12 * w));   // dark gaps between lamp lines are bridged
+  let xa = xp, xb = xp;
+  for (let x = xp - 1, miss = 0; x >= 0; x--) { if (on(x)) { xa = x; miss = 0; } else if (++miss > gap) break; }
+  for (let x = xp + 1, miss = 0; x < w; x++) { if (on(x)) { xb = x; miss = 0; } else if (++miss > gap) break; }
+  if (xb - xa < 4) return null;
+  return { vertical: false, x0: xa / w, x1: (xb + 1) / w, y0: y0 / h, y1: (y1 + 1) / h };
 }
 
 /** Gaussian blur of a 1-D array (edges repeat the end value). sigma in samples. */

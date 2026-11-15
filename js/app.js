@@ -20,7 +20,10 @@ const DEFAULTS = {
   gWeight: 1, average: 4, resolution: '1080',
   showSum: true, showR: true, showG: true, showB: true,
   snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp',
+  follow: true, bigOnStart: true, keepFixed: true,
 };
+const FIND_EVERY_MS = 500;     // how often the live view looks for the spectrum when following it
+const NOTICE_MS = 6000;        // how long warnings stay on the picture after a capture
 
 const $ = (id) => document.getElementById(id);
 const els = {};
@@ -33,7 +36,10 @@ const els = {};
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
+  'ovRotate', 'ovBig', 'bigBar', 'bigCapture', 'bigFind', 'bigFocus', 'bigRotate', 'bigExit',
+  'btnBig', 'btnFind', 'btnFocus', 'bigOnStart', 'keepFixed', 'follow',
 ].forEach((id) => { els[id] = $(id); });
+const appEl = document.querySelector('.app');
 
 const LUT_LIN = core.makeLut(true), LUT_RAW = core.makeLut(false);
 const COARSE = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
@@ -65,6 +71,10 @@ const state = {
   cursorPx: null, view: null, geom: null, viewFit: null,
   sig: '', points: [], cal: core.fitCalibration([], 1), autoInfo: null,
   errors: [], sw: 'not registered', noticeKey: '', photoUrl: null, photoName: '', hold: null,
+  comp: 0,             // extra quarter turns that undo the browser turning camera frames with the screen
+  holdComp: 0,         // the same, for the captured frame
+  rotatesWithScreen: null,   // does this browser turn camera frames when the screen turns? (learnt)
+  big: false, lastFind: 0, findState: '', noticesUntil: 0, noticeTimer: 0,
 };
 
 // ---------------------------------------------------------------- storage
@@ -151,7 +161,7 @@ function configureFrame() {
     dh = Math.max(1, Math.round(dh * k));
   }
   state.dw = dw; state.dh = dh;
-  const turned = s.rot % 180 !== 0;
+  const turned = (s.rot + frameComp()) % 180 !== 0;
   const W = turned ? dh : dw, H = turned ? dw : dh;
   if (W !== state.W) state.cursorPx = null;
   state.W = W; state.H = H;
@@ -160,6 +170,20 @@ function configureFrame() {
   state.avg = []; state.edges = null; state.view = null;
   loadCalibration();
   syncOutputs();
+  updateButtons();
+}
+
+/** Quarter turns (degrees) added to the source so that the analysed frame stays fixed to the
+ *  phone: the live compensation, the one stored with a captured frame, or none for a photo. */
+function frameComp() {
+  if (state.kind !== 'live') return 0;
+  return state.frozen ? state.holdComp : state.comp;
+}
+
+/** Total clockwise rotation (degrees) applied to the source. */
+function frameAngle() {
+  const s = state.settings;
+  return s.rot + frameComp() + s.tilt;
 }
 
 /** Draw the source into the analysed frame: rotate in quarter turns, tilt, then mirror. */
@@ -170,9 +194,160 @@ function drawFrame() {
   ctx.fillRect(0, 0, W, H);
   ctx.translate(W / 2, H / 2);
   if (s.flip) ctx.scale(-1, 1);
-  ctx.rotate((s.rot + s.tilt) * Math.PI / 180);
+  ctx.rotate(frameAngle() * Math.PI / 180);
   ctx.drawImage(state.srcEl, -state.dw / 2, -state.dh / 2, state.dw, state.dh);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+/** A point of the analysed frame (fractions 0..1) as a point of the camera's own picture. */
+function frameToSource(fx, fy) {
+  const a = -frameAngle() * Math.PI / 180;
+  let px = fx * state.W - state.W / 2, py = fy * state.H - state.H / 2;
+  if (state.settings.flip) px = -px;
+  const qx = px * Math.cos(a) - py * Math.sin(a), qy = px * Math.sin(a) + py * Math.cos(a);
+  return { x: core.clamp((qx + state.dw / 2) / state.dw, 0, 1), y: core.clamp((qy + state.dh / 2) / state.dh, 0, 1) };
+}
+
+// ---------------------------------------------------------------- turning the phone
+
+/** How far the screen is turned from upright, in degrees: 0, 90 (top of the phone to the left),
+ *  -90 (to the right) or 180. */
+function deviceTurn() {
+  const f = window.spectroscope && window.spectroscope.forceTurn;
+  let a = typeof f === 'number' ? f
+    : typeof window.orientation === 'number' ? window.orientation
+      : (screen.orientation && typeof screen.orientation.angle === 'number') ? screen.orientation.angle : 0;
+  a = ((Math.round(a / 90) * 90) % 360 + 360) % 360;
+  return a === 270 ? -90 : a;
+}
+
+/** Phones turn camera frames to match the screen; this undoes that, so the picture stays fixed
+ *  to the phone. Whether this browser does it is learnt from the frame shape when the screen turns. */
+function liveComp(vw, vh) {
+  if (!state.settings.keepFixed) return 0;
+  const t = deviceTurn(), wide = vw > vh;
+  if (t === 90 || t === -90) {
+    if (!wide) state.rotatesWithScreen = false;            // sideways screen, upright frames: not turned
+    else if (state.rotatesWithScreen === null) state.rotatesWithScreen = COARSE;
+  } else if (t === 0 && wide && COARSE) {
+    state.rotatesWithScreen = false;                        // upright phone giving wide frames: not turned
+  }
+  return state.rotatesWithScreen ? t : 0;
+}
+
+/** Turn the whole app back when a phone is held sideways, so it looks the same as upright. */
+function applyScreenTurn() {
+  const t = deviceTurn();
+  const forced = !!(window.spectroscope && typeof window.spectroscope.forceTurn === 'number');   // test hook
+  const phone = forced || (COARSE && Math.min(screen.width || 0, screen.height || 0) < 600);
+  const turn = state.settings.keepFixed && phone && (t === 90 || t === -90) && window.innerWidth > window.innerHeight ? t : 0;
+  const want = turn ? String(turn) : null;
+  if (document.documentElement.getAttribute('data-turn') !== want) {
+    if (want) document.documentElement.setAttribute('data-turn', want);
+    else document.documentElement.removeAttribute('data-turn');
+    requestRender();
+  }
+}
+
+// ---------------------------------------------------------------- finding the spectrum
+
+let finder = null;
+/** Look for the colourful band in the analysed frame (see core.findSpectrumBox). */
+function detectBand() {
+  if (!state.fc || !state.W) return null;
+  if (!finder) finder = document.createElement('canvas');
+  const fw = 320, fh = Math.max(8, Math.round(320 * state.H / state.W));
+  if (finder.width !== fw || finder.height !== fh) { finder.width = fw; finder.height = fh; }
+  const fctx = finder.getContext('2d', { willReadFrequently: true });
+  fctx.drawImage(state.fc.c, 0, 0, fw, fh);
+  return core.findSpectrumBox(fctx.getImageData(0, 0, fw, fh).data, fw, fh);
+}
+
+/** Move the band onto a found spectrum: its middle 60 % in height, its full length plus a margin
+ *  of 3 % of the frame at each end, so the dim violet and red ends are kept. */
+function applyBox(box, gentle) {
+  const s = state.settings;
+  const target = {
+    bandPos: (box.y0 + box.y1) / 2 * 100,
+    bandH: core.clamp((box.y1 - box.y0) * 60, 0.3, 60),
+    x0: core.clamp(box.x0 * 100 - 3, 0, 90),
+    x1: core.clamp(box.x1 * 100 + 3, 10, 100),
+  };
+  if (target.x1 < target.x0 + 5) target.x1 = Math.min(100, target.x0 + 5);
+  let changed = false;
+  for (const k of ['bandPos', 'bandH', 'x0', 'x1']) {
+    const d = target[k] - s[k];
+    // while following, small changes are ignored so the band does not jitter
+    if (Math.abs(d) <= (gentle ? { bandPos: 0.4, bandH: 0.3, x0: 0.8, x1: 0.8 }[k] : 0.05)) continue;
+    s[k] = Math.round((gentle ? s[k] + 0.6 * d : target[k]) * 10) / 10;
+    els[k].value = s[k];
+    changed = true;
+  }
+  if (changed) { state.view = null; state.avg = []; syncOutputs(); renderCalibration(); saveStore(); }
+  return changed;
+}
+
+/** One-shot search (button): turns the picture if the spectrum runs up and down, then places the band. */
+function findSpectrum() {
+  if (!state.W) { toast('Start the camera or load a photo first.'); return; }
+  try {
+    if (!isLive()) drawFrame();
+    let box = detectBand();
+    if (box && box.vertical) {
+      setSetting('rot', (state.settings.rot + 90) % 360);
+      drawFrame();
+      box = detectBand();
+    }
+    if (!box || box.vertical) {
+      toast('No spectrum found. Point the spectroscope at a light and check that the rainbow is in the picture.');
+      return;
+    }
+    applyBox(box, false);
+    if (isLive()) { setSetting('follow', true); els.follow.checked = true; }
+    reprocess();
+    toast('Band placed on the spectrum.');
+  } catch (e) { logError('find spectrum', e); }
+}
+
+/** Ask the camera to focus and meter at a point of the analysed frame, if the browser lets the page. */
+async function focusAt(fx, fy, quiet) {
+  const t = state.track;
+  if (!t || !isLive()) { if (!quiet) toast('Focus works while the camera is live.'); return; }
+  let sup = {}, caps = {};
+  try { sup = navigator.mediaDevices.getSupportedConstraints() || {}; } catch (e) { sup = {}; }
+  try { caps = (t.getCapabilities && t.getCapabilities()) || {}; } catch (e) { caps = {}; }
+  const adv = {};
+  if (sup.pointsOfInterest) adv.pointsOfInterest = [frameToSource(fx, fy)];
+  if (Array.isArray(caps.focusMode)) {
+    if (caps.focusMode.includes('single-shot')) adv.focusMode = 'single-shot';
+    else if (caps.focusMode.includes('continuous')) adv.focusMode = 'continuous';
+  }
+  if (adv.pointsOfInterest && Array.isArray(caps.exposureMode) && caps.exposureMode.includes('continuous')) adv.exposureMode = 'continuous';
+  if (!Object.keys(adv).length) {
+    if (!quiet) toast('This camera does not let the page choose where to focus; the phone focuses by itself.', 5000);
+    return;
+  }
+  try {
+    await t.applyConstraints({ advanced: [adv] });
+    if (!quiet) toast(adv.pointsOfInterest ? 'Focusing and metering on the spectrum.' : 'Refocusing.');
+  } catch (e) {
+    logError('focus', e);
+    if (!quiet) toast('The camera refused to refocus.');
+  }
+}
+
+function focusOnBand() {
+  const s = state.settings;
+  focusAt((s.x0 + s.x1) / 200, s.bandPos / 100, false);
+}
+
+// ---------------------------------------------------------------- big view
+
+function setBig(on) {
+  state.big = !!on;
+  appEl.classList.toggle('big', state.big);
+  updateButtons();
+  requestRender();
 }
 
 function bandRect() {
@@ -297,11 +472,18 @@ function liveLoop(t) {
     const v = els.video;
     if (v.readyState >= 2 && v.videoWidth > 0) {
       try {
-        if (v.videoWidth !== state.srcW || v.videoHeight !== state.srcH) {
-          state.srcW = v.videoWidth; state.srcH = v.videoHeight;
+        const comp = liveComp(v.videoWidth, v.videoHeight);
+        if (v.videoWidth !== state.srcW || v.videoHeight !== state.srcH || comp !== state.comp) {
+          state.srcW = v.videoWidth; state.srcH = v.videoHeight; state.comp = comp;
           configureFrame();
         }
         drawFrame();
+        if (state.settings.follow && t - state.lastFind >= FIND_EVERY_MS) {
+          state.lastFind = t;
+          const box = detectBand();
+          state.findState = !box ? 'none' : box.vertical ? 'vertical' : 'found';
+          if (box && !box.vertical) applyBox(box, true);
+        }
         pushMeasurement(measure(t, false));
         state.frameCount++;
         render();
@@ -339,6 +521,7 @@ function stopCamera() {
   }
   state.stream = null; state.track = null;
   els.video.srcObject = null;
+  if (state.big) setBig(false);
 }
 
 async function startCamera(deviceId, explicit) {
@@ -367,6 +550,7 @@ async function startCamera(deviceId, explicit) {
   try { await els.video.play(); } catch (e) { logError('video.play', e); }
   state.kind = 'live'; state.frozen = false; state.srcEl = els.video; state.p3 = false;
   state.srcW = 0; state.srcH = 0; state.profile = null; state.avg = [];
+  state.rotatesWithScreen = null; state.comp = 0; state.noticesUntil = 0;
   els.viewHint.hidden = true;
   await refreshCameraList();
   // go back to the lens chosen last time, if this is a different one
@@ -375,9 +559,19 @@ async function startCamera(deviceId, explicit) {
     const d = state.devices.find((x) => x.label === want);
     if (d) return startCamera(d.deviceId, true);
   }
+  try { if (screen.orientation && screen.orientation.lock) screen.orientation.lock('portrait').catch(() => {}); } catch (e) { /* not offered */ }
   buildCameraControls();
+  if (state.settings.bigOnStart) setBig(true);
   updateButtons();
   startLoop();
+}
+
+/** Show the warnings over the picture for a few seconds (after a capture or a photo). */
+function flashNotices() {
+  state.noticesUntil = performance.now() + NOTICE_MS;
+  state.noticeKey = '';
+  clearTimeout(state.noticeTimer);
+  state.noticeTimer = setTimeout(requestRender, NOTICE_MS + 50);
 }
 
 async function refreshCameraList() {
@@ -408,7 +602,10 @@ function toggleFreeze() {
     c.width = v.videoWidth; c.height = v.videoHeight;
     c.getContext('2d').drawImage(v, 0, 0);
     state.srcEl = c;
+    state.holdComp = state.comp;   // the captured frame keeps the turn it had, whatever the phone does next
     state.frozen = true;
+    flashNotices();
+    if (state.big) setBig(false);   // show the controls for working on the capture
   } else if (state.track && state.track.readyState === 'ended') {
     // the camera was taken away while the frame was frozen (for example the app went to the background)
     stopCamera();
@@ -543,7 +740,9 @@ async function loadPhoto(file) {
     els.viewHint.hidden = true;
     configureFrame();
     reprocess();
+    flashNotices();
     buildCameraControls();
+    if (state.big) setBig(false);
     updateButtons();
   } catch (e) {
     toast(e && e.message ? e.message : 'That image could not be loaded.');
@@ -759,7 +958,8 @@ function keepOrForgetLine() {
 // ---------------------------------------------------------------- drawing
 
 function sizeCanvas(cv, wrap, maxDpr) {
-  const r = wrap.getBoundingClientRect();
+  // the layout size, not the on-screen box: the two differ when the app is turned on a sideways phone
+  const r = { width: wrap.clientWidth, height: wrap.clientHeight };
   const dpr = Math.min(window.devicePixelRatio || 1, maxDpr);
   const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
   if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
@@ -926,17 +1126,25 @@ function updateStatus() {
   if (state.W) {
     const size = `${state.W}×${state.H}`;
     if (state.kind === 'photo') t = `Photo ${size}${state.p3 ? ' P3' : ''}`;
-    else if (state.frozen) t = `Frozen ${size}`;
+    else if (state.frozen) t = `Captured ${size}`;
     else t = `Live ${size}`;
   }
   if (els.srcStatus.textContent !== t) els.srcStatus.textContent = t;
-  // brightest part of the band, as a share of full scale: the thing to watch while setting exposure
-  const badge = p ? `Peak ${Math.round(p.peakRaw / 2.55)}%${p.frames > 1 ? `, ${p.frames} frames` : ''}` : '';
+  // brightest part of the band, as a share of full scale: the thing to watch while setting exposure.
+  // While live this small label is the only brightness warning, so nothing else on screen moves.
+  const clipped = !!p && core.clippedRanges(p.clip).length > 0;
+  let badge = p ? `Peak ${Math.round(p.peakRaw / 2.55)}%${clipped ? ', too bright' : p.peakRaw < 40 ? ', dim' : ''}` : '';
+  if (isLive() && state.settings.follow) {
+    if (state.findState === 'none') badge = 'Looking for the spectrum' + (badge ? ` · ${badge}` : '');
+    else if (state.findState === 'vertical') badge = 'Spectrum is upright: tap ⟳ 90°';
+  }
   if (els.viewBadge.textContent !== badge) els.viewBadge.textContent = badge;
   els.viewBadge.hidden = !badge;
+  els.viewBadge.classList.toggle('warn', clipped);
 
   const notes = [];
-  if (p) {
+  // the written warnings appear only for a few seconds after a capture or a photo, over the picture
+  if (p && !isLive() && performance.now() < state.noticesUntil) {
     const ranges = core.clippedRanges(p.clip);
     if (ranges.length) {
       const shown = ranges.slice(0, 3).map(([a, b]) => rangeText(a, b)).join(', ');
@@ -964,6 +1172,7 @@ function updateStatus() {
     const body = document.createElement('span');
     body.textContent = (kind === 'warn' ? 'Warning. ' : '') + text;
     row.appendChild(ico); row.appendChild(body);
+    row.addEventListener('click', () => { state.noticesUntil = 0; requestRender(); });
     els.notices.appendChild(row);
   }
 }
@@ -991,8 +1200,13 @@ function updateButtons() {
   els.btnCamera.textContent = on ? 'Stop camera' : 'Start camera';
   els.btnCamera.classList.toggle('primary', !on);
   els.btnFreeze.disabled = !on;
-  els.btnFreeze.textContent = state.frozen ? 'Resume' : 'Freeze';
+  els.btnFreeze.textContent = state.frozen ? 'Back to live' : 'Capture';
+  els.bigCapture.textContent = state.frozen ? 'Back to live' : 'Capture';
+  els.btnBig.disabled = !on;
+  els.btnFocus.disabled = !on;
   els.btnFlip.setAttribute('aria-pressed', String(!!state.settings.flip));
+  els.ovRotate.hidden = !state.W;
+  els.ovBig.hidden = !on || state.big;
 }
 
 function syncOutputs() {
@@ -1014,6 +1228,7 @@ function syncControls() {
   els.snap.value = s.snap;
   els.refLines.value = s.refLines;
   els.autoSource.value = s.autoSource === 'sun' ? 'sun' : 'lamp';
+  for (const id of ['follow', 'bigOnStart', 'keepFixed']) els[id].checked = !!s[id];
   els.name.value = s.name;
   document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(!!s[c.dataset.series])));
   syncOutputs();
@@ -1071,8 +1286,27 @@ function wire() {
     const d = state.devices.find((x) => x.deviceId === els.cameraSelect.value);
     if (d) { state.settings.cameraLabel = d.label || ''; saveStore(); startCamera(d.deviceId, true); }
   });
-  els.btnRotate.addEventListener('click', () => setSetting('rot', (state.settings.rot + 90) % 360));
+  // Rotating works on a captured frame too: the capture keeps the untouched camera picture
+  const rotate90 = () => setSetting('rot', (state.settings.rot + 90) % 360);
+  els.btnRotate.addEventListener('click', rotate90);
+  els.ovRotate.addEventListener('click', rotate90);
+  els.bigRotate.addEventListener('click', rotate90);
   els.btnFlip.addEventListener('click', () => setSetting('flip', !state.settings.flip));
+  els.bigCapture.addEventListener('click', toggleFreeze);
+  els.bigFind.addEventListener('click', findSpectrum);
+  els.btnFind.addEventListener('click', findSpectrum);
+  els.bigFocus.addEventListener('click', focusOnBand);
+  els.btnFocus.addEventListener('click', focusOnBand);
+  els.bigExit.addEventListener('click', () => setBig(false));
+  els.ovBig.addEventListener('click', () => setBig(true));
+  els.btnBig.addEventListener('click', () => setBig(true));
+  els.follow.addEventListener('change', () => { setSetting('follow', els.follow.checked); state.findState = ''; });
+  els.bigOnStart.addEventListener('change', () => setSetting('bigOnStart', els.bigOnStart.checked));
+  els.keepFixed.addEventListener('change', () => {
+    setSetting('keepFixed', els.keepFixed.checked);
+    state.rotatesWithScreen = null;
+    applyScreenTurn();
+  });
 
   document.querySelectorAll('.chip').forEach((c) => c.addEventListener('click', () => {
     const key = c.dataset.series;
@@ -1080,28 +1314,54 @@ function wire() {
     c.setAttribute('aria-pressed', String(state.settings[key]));
   }));
 
-  // drag on the picture to move the band
-  let dragging = false;
+  // Positions inside a canvas come from offsetX / offsetY, which are in the canvas's own
+  // coordinates even when the app is turned back on a sideways phone (see applyScreenTurn).
+  const local = (e, el) => {
+    if (typeof e.offsetX === 'number' && typeof e.offsetY === 'number') return { x: e.offsetX, y: e.offsetY };
+    const r = el.getBoundingClientRect();
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  };
+
+  // drag on the picture to move the band; while live, a tap also focuses there if the camera allows
+  let dragging = false, downAt = null;
   const moveBand = (e) => {
     const f = state.viewFit;
     if (!f) return;
-    const r = els.view.getBoundingClientRect();
-    const row = (e.clientY - r.top - f.dy) / f.k;
+    const row = (local(e, els.view).y - f.dy) / f.k;
     const v = core.clamp(Math.round(row / state.H * 1000) / 10, 0, 100);
     els.bandPos.value = v;
     setSetting('bandPos', v);
   };
-  els.view.addEventListener('pointerdown', (e) => { dragging = true; try { els.view.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ } moveBand(e); e.preventDefault(); });
+  els.view.addEventListener('pointerdown', (e) => {
+    if (!state.viewFit) return;
+    dragging = true;
+    downAt = local(e, els.view);
+    try { els.view.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
+    if (state.settings.follow && isLive()) {
+      setSetting('follow', false);
+      els.follow.checked = false;
+      toast('Band placed by hand. Find spectrum puts it back on automatic.');
+    }
+    moveBand(e);
+    e.preventDefault();
+  });
   els.view.addEventListener('pointermove', (e) => { if (dragging) moveBand(e); });
-  ['pointerup', 'pointercancel'].forEach((n) => els.view.addEventListener(n, () => { dragging = false; }));
+  els.view.addEventListener('pointerup', (e) => {
+    if (!dragging) return;
+    dragging = false;
+    const f = state.viewFit, p = local(e, els.view);
+    if (f && downAt && Math.hypot(p.x - downAt.x, p.y - downAt.y) < 12 && isLive()) {
+      focusAt(core.clamp((p.x - f.dx) / f.k / state.W, 0, 1), core.clamp((p.y - f.dy) / f.k / state.H, 0, 1), true);
+    }
+  });
+  els.view.addEventListener('pointercancel', () => { dragging = false; });
 
   // touch the plot to place the cursor; it snaps when the finger lifts
   let plotting = false;
   const moveCursor = (e, done) => {
     const g = state.geom, p = state.profile;
     if (!g || !p) return;
-    const r = els.plot.getBoundingClientRect();
-    const frac = core.clamp((e.clientX - r.left - g.left) / Math.max(1, g.right - g.left), 0, 1);
+    const frac = core.clamp((local(e, els.plot).x - g.left) / Math.max(1, g.right - g.left), 0, 1);
     let px = g.xa + frac * (g.xb - g.xa);
     if (done && state.settings.snap !== 'off') {
       // look about a fingertip either side: 14 screen pixels, converted to image columns
@@ -1194,7 +1454,9 @@ function wire() {
     const obs = new ResizeObserver(() => requestRender());
     obs.observe(els.viewWrap); obs.observe(els.plotWrap);
   }
-  window.addEventListener('resize', requestRender);
+  window.addEventListener('resize', () => { applyScreenTurn(); requestRender(); });
+  window.addEventListener('orientationchange', () => { applyScreenTurn(); setTimeout(applyScreenTurn, 300); });
+  if (screen.orientation && screen.orientation.addEventListener) screen.orientation.addEventListener('change', applyScreenTurn);
   const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
   if (mq && mq.addEventListener) mq.addEventListener('change', () => { colorCache = null; requestRender(); });
   document.addEventListener('visibilitychange', () => {
@@ -1345,6 +1607,11 @@ function diagnostics() {
       video: { ready: v.readyState, size: `${v.videoWidth}x${v.videoHeight}`, paused: v.paused },
     },
     camera: { label: state.trackLabel, cameras_listed: state.devices.map((d) => d.label), settings: sett, capabilities: caps, constraints_known: supported },
+    turning: { screen_turn: deviceTurn(), window_orientation: typeof window.orientation === 'number' ? window.orientation : null,
+      screen_orientation: screen.orientation ? `${screen.orientation.type} ${screen.orientation.angle}` : null,
+      app_turned: document.documentElement.getAttribute('data-turn'), frames_turn_with_screen: state.rotatesWithScreen,
+      live_compensation: state.comp, capture_compensation: state.holdComp },
+    band_finder: state.findState,
     settings: state.settings,
     calibrations_saved: Object.keys(state.cals),
     errors: state.errors,
@@ -1383,4 +1650,5 @@ if ('serviceWorker' in navigator && !location.search.includes('nosw') &&
 }
 
 // for the test scripts and for poking around in a desktop browser console
-window.spectroscope = { state, core, reprocess, loadPhoto, render };
+window.spectroscope = { state, core, reprocess, loadPhoto, render, applyScreenTurn, findSpectrum, setBig, forceTurn: undefined };
+applyScreenTurn();

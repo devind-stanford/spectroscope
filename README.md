@@ -7,10 +7,15 @@ to an iPhone or Android home screen, where it also works offline.
 ## Using it
 
 1. Open the page in Safari (iPhone) or Chrome (Android) and add it to the home screen.
-2. **Source**: start the camera, or load a photo of the spectrum. Rotate or flip until
-   the spectrum runs left to right with blue on the left.
-3. **Band**: drag on the picture to put the sampling band on the spectrum. Each
-   column inside the band is averaged to give the R, G, B and combined curves.
+2. **Source**: start the camera, or load a photo of the spectrum. The camera opens in a
+   big view with large Capture, Find spectrum, Focus and rotate buttons; the band follows
+   the spectrum by itself until you place it by hand. Tapping the picture also asks the
+   camera to focus there, where the browser allows it. Capture holds the frame; it can
+   still be rotated or flipped afterwards. Rotate or flip until the spectrum runs left
+   to right with blue on the left. The screen and picture stay fixed when the phone turns.
+3. **Band**: Find spectrum places the sampling band on the rainbow (and turns the picture
+   if the spectrum runs up and down); you can also drag on the picture. Each column inside
+   the band is averaged to give the R, G, B and combined curves.
 4. **Calibrate automatically**: point at a fluorescent lamp, or at blue sky or a white
    sheet in sunlight, cover the whole spectrum with the band, choose the light and tap
    **Auto-calibrate**. The lines it finds are listed and can be checked or edited.
