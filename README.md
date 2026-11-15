@@ -11,7 +11,10 @@ to an iPhone or Android home screen, where it also works offline.
    the spectrum runs left to right with blue on the left.
 3. **Band**: drag on the picture to put the sampling band on the spectrum. Each
    column inside the band is averaged to give the R, G, B and combined curves.
-4. **Calibrate**: tap the plot on a line you recognise, pick or type its wavelength
+4. **Calibrate automatically**: point at a fluorescent lamp, or at blue sky or a white
+   sheet in sunlight, cover the whole spectrum with the band, choose the light and tap
+   **Auto-calibrate**. The lines it finds are listed and can be checked or edited.
+   **Or calibrate by hand**: tap the plot on a line you recognise, pick or type its wavelength
    and add it. Add as many lines as you like: two give a straight-line fit, three a
    curved one, and from four on the fit also reports how well the lines agree.
    **Keep** stores a typed wavelength in the list for next time. The calibration is
@@ -27,6 +30,10 @@ to an iPhone or Android home screen, where it also works offline.
 - Wavelength comes from a polynomial in the pixel offset from the centre of the frame,
   fitted to the lines you mark. "Shift to match" slides an existing calibration
   sideways using one known line, for when the phone has been remounted.
+- Automatic calibration from a fluorescent lamp matches the detected peaks to the
+  lamp's mercury, terbium and europium lines. From sunlight it matches the dark lines
+  against a stored reference sunlight spectrum (`js/solar.js`, from the public ASTM G173
+  standard), then fits through the individual dark features.
 
 The CSV columns are `pixel, wavelength_nm, R, G, B, intensity, clipped_fraction`
 (`wavelength_nm` only when calibrated).
@@ -62,7 +69,8 @@ work, because browsers refuse to load script modules from `file:` addresses.
 | File | Purpose |
 |---|---|
 | `index.html`, `style.css` | The page and its layout |
-| `js/core.js` | Analysis: column averages, peak finding, calibration fit, CSV |
+| `js/core.js` | Analysis: column averages, peak finding, calibration fit, automatic calibration, CSV |
+| `js/solar.js` | Reference sunlight spectrum for automatic calibration |
 | `js/plot.js` | Draws the spectrum plot |
 | `js/app.js` | Camera, photo loading, controls, saving |
 | `sw.js`, `manifest.webmanifest`, `icons/` | Home-screen install and the offline copy |

@@ -151,6 +151,19 @@
 
     <div class="panel" data-panel="calibrate" role="tabpanel" hidden>
       <p class="fit" id="fitSummary">No lines marked yet.</p>
+      <h2>Automatic</h2>
+      <div class="row field">
+        <label for="autoSource">Light</label>
+        <select id="autoSource">
+          <option value="lamp">Fluorescent lamp</option>
+          <option value="sun">Sunlight or blue sky</option>
+        </select>
+      </div>
+      <div class="row buttons">
+        <button type="button" class="btn primary" id="btnAuto">Auto-calibrate</button>
+      </div>
+      <p class="note" id="autoStatus">Point the spectroscope at the light and put the band on the whole spectrum, violet to red. Auto-calibrate then finds the known lines and lists them below, where they can be checked, removed or added to.</p>
+      <h2>By hand</h2>
       <ol class="steps">
         <li>Tap the plot on a line you recognise. Use the arrows under the plot for single pixels.</li>
         <li>Pick a known line, or type any wavelength, then add it.</li>
@@ -175,7 +188,7 @@
       </div>
       <p class="note">Keep stores the typed wavelength under My lines in the list above, so it is there next time.</p>
       <div class="row buttons">
-        <button type="button" class="btn primary" id="btnAddPoint">Add line at cursor</button>
+        <button type="button" class="btn" id="btnAddPoint">Add line at cursor</button>
         <button type="button" class="btn" id="btnShift">Shift to match</button>
       </div>
       <p class="note">Shift to match slides the whole calibration sideways so the cursor reads the wavelength above. Use it after remounting the phone, with one line you trust.</p>

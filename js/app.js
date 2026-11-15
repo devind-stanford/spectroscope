@@ -3,6 +3,7 @@
 
 import * as core from './core.js';
 import { drawPlot } from './plot.js';
+import { SOLAR } from './solar.js';
 
 const LS_KEY = 'spectroscope.v1';
 const MAX_PHOTO_SIDE = 4096;   // larger photos are scaled so the long side is this many pixels
@@ -18,7 +19,7 @@ const DEFAULTS = {
   linearise: true, subtractBg: false, normalise: true, labelPeaks: false,
   gWeight: 1, average: 4, resolution: '1080',
   showSum: true, showR: true, showG: true, showB: true,
-  snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum',
+  snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -28,7 +29,7 @@ const els = {};
   'btnRotate', 'btnFlip', 'tilt', 'tiltOut', 'camControls', 'camNone',
   'bandPos', 'bandPosOut', 'bandH', 'bandHOut', 'x0', 'x0Out', 'x1', 'x1Out',
   'linearise', 'subtractBg', 'normalise', 'labelPeaks', 'gWeight',
-  'fitSummary', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
+  'fitSummary', 'autoSource', 'btnAuto', 'autoStatus', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
@@ -62,7 +63,7 @@ const state = {
   avg: [], avgKey: '', edges: null,
   profile: null, norm: 1,
   cursorPx: null, view: null, geom: null, viewFit: null,
-  sig: '', points: [], cal: core.fitCalibration([], 1),
+  sig: '', points: [], cal: core.fitCalibration([], 1), autoInfo: null,
   errors: [], sw: 'not registered', noticeKey: '', photoUrl: null, photoName: '', hold: null,
 };
 
@@ -559,15 +560,19 @@ function nmToPx(nm) { const o = core.calOffset(state.cal, nm); return o === null
 function loadCalibration() {
   state.sig = signature();
   const saved = state.cals[state.sig];
-  state.points = saved && Array.isArray(saved.points) ? saved.points.map((p) => ({ off: Number(p.off), nm: Number(p.nm) })) : [];
+  state.points = saved && Array.isArray(saved.points)
+    ? saved.points.map((p) => (p.src ? { off: Number(p.off), nm: Number(p.nm), src: String(p.src) } : { off: Number(p.off), nm: Number(p.nm) }))
+    : [];
+  state.autoInfo = saved && saved.auto ? saved.auto : null;
   refit(false);
 }
 
 function refit(save = true) {
   state.points.sort((a, b) => a.off - b.off);   // listed left to right, however they were added
+  if (!state.points.length) state.autoInfo = null;
   state.cal = core.fitCalibration(state.points, state.W || 1);
   if (save) {
-    if (state.points.length) state.cals[state.sig] = { points: state.points, savedAt: new Date().toISOString() };
+    if (state.points.length) state.cals[state.sig] = { points: state.points, auto: state.autoInfo, savedAt: new Date().toISOString() };
     else delete state.cals[state.sig];
     saveStore();
   }
@@ -584,6 +589,11 @@ function renderCalibration() {
     const li = document.createElement('li');
     const span = document.createElement('span');
     span.textContent = `${p.nm.toFixed(1)} nm at pixel ${(p.off + state.W / 2).toFixed(1)}`;
+    if (p.src) {
+      const tag = document.createElement('small');
+      tag.textContent = p.src === 'sun' ? '  from sunlight' : '  from lamp';
+      span.appendChild(tag);
+    }
     if (cal.ok && cal.n > cal.degree + 1) {
       const small = document.createElement('small');
       small.textContent = `  misses by ${signed(cal.residuals[i])} nm`;
@@ -632,6 +642,48 @@ function addPoint() {
   refit();
 }
 
+const AUTO_NAMES = { lamp: 'the lamp', sun: 'sunlight' };
+
+/** Calibrate from a known light: finds the lines, replaces the marked list, shows lines to compare. */
+function runAuto() {
+  const p = state.profile;
+  if (!p) { toast('Start the camera or load a photo first.'); return; }
+  const src = els.autoSource.value === 'sun' ? 'sun' : 'lamp';
+  const say = (text) => { els.autoStatus.textContent = text; };
+  // a mirrored spectrum is recognised from its colours: red on the left
+  if (p.peakRaw >= 20 && core.redBlueTrend(p.r, p.b) < -0.3) {
+    say('The spectrum runs from red on the left to blue on the right. Tap Flip left-right in the Source tab, then try again.');
+    toast('Flip the spectrum first.');
+    return;
+  }
+  els.btnAuto.disabled = true;
+  say('Working…');
+  setTimeout(() => {   // let the button and the text update before the search runs
+    let res;
+    try {
+      res = src === 'sun' ? core.autoCalibrateSun(p.sum, p.x0, state.W, SOLAR) : core.autoCalibrateLamp(p.sum, p.x0, state.W);
+    } catch (e) {
+      logError('auto-calibrate', e);
+      res = { ok: false, message: 'Auto-calibration failed with an error. See More, Diagnostics.', warnings: [] };
+    }
+    els.btnAuto.disabled = false;
+    if (!res.ok) { say(res.message); toast('Auto-calibration did not work. See the Calibrate tab.'); return; }
+    if (state.points.length && !window.confirm(`Replace the ${state.points.length} marked line${state.points.length > 1 ? 's' : ''} with the automatic calibration?`)) {
+      say('Not applied: the marked lines were kept.');
+      return;
+    }
+    state.points = res.points.map((q) => ({ off: q.off, nm: q.nm, src: q.src }));
+    state.autoInfo = { source: src, match: res.r === undefined ? null : Math.round(res.r * 1000) / 1000, lines: res.points.length, at: new Date().toISOString() };
+    refit();
+    say([res.message, ...res.warnings].join(' '));
+    els.refLines.value = src === 'sun' ? 'sun' : 'fluor';
+    setSetting('refLines', els.refLines.value);
+    els.snap.value = src === 'sun' ? 'dip' : 'peak';
+    setSetting('snap', els.snap.value);
+    toast(`Calibrated from ${AUTO_NAMES[src]}.`);
+  }, 30);
+}
+
 function shiftToMatch() {
   if (!calOk()) return;
   if (state.cursorPx === null) { toast('Tap the plot on the line first.'); return; }
@@ -640,7 +692,7 @@ function shiftToMatch() {
   const at = core.calOffset(state.cal, nm);
   if (at === null) { toast('That wavelength is outside this calibration.'); return; }
   const d = (state.cursorPx - state.W / 2) - at;
-  state.points = state.points.map((p) => ({ off: p.off + d, nm: p.nm }));
+  state.points = state.points.map((p) => ({ ...p, off: p.off + d }));
   refit();
   toast(`Calibration moved by ${d.toFixed(1)} pixels.`);
 }
@@ -961,6 +1013,7 @@ function syncControls() {
   els.resolution.value = String(s.resolution);
   els.snap.value = s.snap;
   els.refLines.value = s.refLines;
+  els.autoSource.value = s.autoSource === 'sun' ? 'sun' : 'lamp';
   els.name.value = s.name;
   document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(!!s[c.dataset.series])));
   syncOutputs();
@@ -1106,6 +1159,8 @@ function wire() {
   els.nm.addEventListener('input', () => { els.preset.value = ''; els.btnKeepLine.textContent = 'Keep'; });
   els.btnKeepLine.addEventListener('click', keepOrForgetLine);
   els.btnAddPoint.addEventListener('click', addPoint);
+  els.btnAuto.addEventListener('click', runAuto);
+  els.autoSource.addEventListener('change', () => setSetting('autoSource', els.autoSource.value));
   els.btnShift.addEventListener('click', shiftToMatch);
   els.btnClearPoints.addEventListener('click', () => {
     if (state.points.length && window.confirm('Remove every marked line for this camera and orientation?')) { state.points = []; refit(); }
@@ -1202,8 +1257,9 @@ function settingsRecord() {
       calibrated: !!cal.ok,
       note: 'wavelength_nm = polynomial in (pixel - frame_width / 2); coefficients highest power first',
       wavelength_coeffs: cal.ok ? cal.coeffs : null,
-      points: state.points.map((q) => ({ px_offset: q.off, nm: q.nm })),
+      points: state.points.map((q) => ({ px_offset: q.off, nm: q.nm, source: q.src || 'hand' })),
       rms_nm: cal.ok ? cal.rms : null,
+      automatic: state.autoInfo,
     },
   };
 }

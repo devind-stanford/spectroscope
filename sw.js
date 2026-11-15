@@ -2,7 +2,7 @@
 // as the phone is online; the saved copy is used when the network is missing or slow.
 // Change CACHE whenever the list of files changes.
 
-const CACHE = 'spectroscope-0.1.2';
+const CACHE = 'spectroscope-0.2.0';
 const ASSETS = [
   './',
   'index.html',
@@ -10,6 +10,7 @@ const ASSETS = [
   'js/app.js',
   'js/core.js',
   'js/plot.js',
+  'js/solar.js',
   'manifest.webmanifest',
   'icons/icon-180.png',
   'icons/icon-192.png',
