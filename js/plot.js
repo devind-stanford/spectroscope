@@ -144,21 +144,13 @@ export function drawPlot(canvas, m) {
     ctx.fillText(s.tag, x, y);
   }
 
-  // peak labels
-  ctx.textAlign = 'center';
-  for (const p of m.peaks) {
-    if (p.px < xa || p.px > xb) continue;
-    const x = clamp(X(p.px), left + 14, right - 14), y = Math.max(top + 9, Y(p.height) - 6);
-    ctx.lineWidth = 3; ctx.strokeStyle = colors.bg;
-    ctx.strokeText(p.text, x, y);
-    ctx.fillStyle = colors.ink;
-    ctx.fillText(p.text, x, y);
-  }
-
   // features and what causes them: short labels in up to three rows along the top, each with a
-  // thin leader down to its line on the combined curve
+  // thin leader down to its line on the combined curve. Placed first, so peak labels keep clear.
   const sum = m.series.find((s) => !s.tag) || m.series[0];
   const rowsEnd = [-Infinity, -Infinity, -Infinity];
+  const placed = [];   // label boxes [x0, x1, y0, y1]
+  const overlaps = (q) => placed.some((b) => q[0] < b[1] && q[1] > b[0] && q[2] < b[3] && q[3] > b[2]);
+  const tags = [];
   ctx.textAlign = 'center';
   for (const f of features) {
     if (f.px < xa || f.px > xb) continue;
@@ -167,6 +159,24 @@ export function drawPlot(canvas, m) {
     if (row < 0) row = rowsEnd.indexOf(Math.min(...rowsEnd));
     rowsEnd[row] = x + tw / 2;
     const ty = top + 9 + row * 12;
+    tags.push({ f, x, ty });
+    placed.push([x - tw / 2 - 2, x + tw / 2 + 2, ty - 10, ty + 3]);
+  }
+
+  // peak labels, most prominent first; one that would overlap another label is left out
+  for (const p of m.peaks) {
+    if (p.px < xa || p.px > xb) continue;
+    const x = clamp(X(p.px), left + 14, right - 14), y = Math.max(top + 9, Y(p.height) - 6);
+    const tw = ctx.measureText(p.text).width, box = [x - tw / 2 - 2, x + tw / 2 + 2, y - 10, y + 3];
+    if (overlaps(box)) continue;
+    placed.push(box);
+    ctx.lineWidth = 3; ctx.strokeStyle = colors.bg;
+    ctx.strokeText(p.text, x, y);
+    ctx.fillStyle = colors.ink;
+    ctx.fillText(p.text, x, y);
+  }
+
+  for (const { f, x, ty } of tags) {
     const v = sum.y[clamp(Math.round(f.px - m.x0), 0, m.n - 1)];
     const yc = Y(v);
     if (yc > ty + 6) {

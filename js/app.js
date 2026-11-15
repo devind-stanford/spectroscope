@@ -20,7 +20,7 @@ const DEFAULTS = {
   gWeight: 1, average: 4, resolution: '1080',
   showSum: true, showR: true, showG: true, showB: true,
   snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp', colourWb: 'd65',
-  follow: true, bigOnStart: true, keepFixed: true, labelFeatures: false,
+  follow: true, bigOnStart: true, keepFixed: true, labelFeatures: false, bigZoom: false,
 };
 const LABEL_KINDS = { lamp: 'lamp', sun: 'sun' };   // which lights have lines to label
 const AUTO_SOURCES = ['lamp', 'sun', 'colour'];
@@ -34,11 +34,11 @@ const els = {};
   'btnRotate', 'btnFlip', 'tilt', 'tiltOut', 'camControls', 'camNone',
   'bandPos', 'bandPosOut', 'bandH', 'bandHOut', 'x0', 'x0Out', 'x1', 'x1Out',
   'linearise', 'subtractBg', 'normalise', 'labelPeaks', 'gWeight',
-  'fitSummary', 'calPlotWrap', 'calPlot', 'calPlotNote', 'btnLabels', 'featureHead', 'featureList', 'featureNote', 'autoSource', 'btnAuto', 'autoStatus', 'colourBox', 'colourWbRow', 'colourWb', 'colourNote', 'btnKeepColours', 'btnForgetColours', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
+  'fitSummary', 'calPlotHead', 'calPlotWrap', 'calPlot', 'calPlotNote', 'btnLabels', 'featureHead', 'featureList', 'featureNote', 'autoSource', 'btnAuto', 'autoStatus', 'colourBox', 'colourWbRow', 'colourWb', 'colourNote', 'btnKeepColours', 'btnForgetColours', 'snap', 'preset', 'nm', 'btnKeepLine', 'btnAddPoint', 'btnShift', 'pointsHead', 'pointList', 'btnClearPoints', 'refLines',
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
-  'ovRotate', 'ovBig', 'bigBar', 'bigCapture', 'bigFind', 'bigRotate', 'bigExit',
+  'ovRotate', 'ovBig', 'bigBar', 'bigCapture', 'bigFind', 'bigZoom', 'bigRotate', 'bigExit',
   'btnBig', 'btnFind', 'bigOnStart', 'keepFixed', 'follow',
 ].forEach((id) => { els[id] = $(id); });
 const appEl = document.querySelector('.app');
@@ -71,7 +71,7 @@ const state = {
   raf: 0, lastTick: 0, frameCount: 0,
   avg: [], avgKey: '', edges: null,
   profile: null, norm: 1,
-  cursorPx: null, view: null, geom: null, viewFit: null,
+  cursorPx: null, view: null, geom: null, viewFit: null, zoomHold: null,
   sig: '', points: [], cal: core.fitCalibration([], 1), autoInfo: null,
   errors: [], sw: 'not registered', noticeKey: '', photoUrl: null, photoName: '', hold: null,
   comp: 0,             // extra quarter turns that undo the browser turning camera frames with the screen
@@ -821,6 +821,7 @@ function renderCalPlot() {
   const on = cal.ok && state.W > 0;
   els.calPlotWrap.hidden = !on;
   els.calPlotNote.hidden = !on;
+  els.calPlotHead.hidden = !on;
   if (!on || !els.calPlotWrap.clientWidth) return;
   const q = bandRect();
   const pts = state.points.map((p) => ({ px: p.off + state.W / 2, nm: p.nm }));
@@ -1128,6 +1129,28 @@ function sizeCanvas(cv, wrap, maxDpr) {
   return { cssW: r.width, cssH: r.height, dpr };
 }
 
+/** Is the big view zoomed onto the spectrum? */
+function zoomed() {
+  return state.big && !!state.settings.bigZoom && !!state.profile;
+}
+
+/** The part of the analysed frame the picture shows: all of it, or (zoomed) the band's length with
+ *  a margin, centred on the band and as tall as the view's shape allows. While the band is being
+ *  dragged the zoomed part stays put, so the picture does not slide under the finger. */
+function viewRect(cw, ch) {
+  const W = state.W, H = state.H;
+  if (!zoomed()) return { sx: 0, sy: 0, sw: W, sh: H };
+  if (state.zoomHold) return state.zoomHold;
+  const p = state.profile, aspect = ch / cw;
+  let sw = Math.max(p.n * 1.1 + 12, W / 10);              // at most 10 times larger
+  let sh = Math.max(sw * aspect, p.hRows * 1.5 + 12);     // the band and some of the picture around it
+  sw = Math.max(sw, sh / aspect);
+  if (sw > W) { sw = W; sh = Math.min(H, Math.max(sh, sw * aspect)); }
+  if (sh > H) { sh = H; sw = Math.min(W, Math.max(sw, sh / aspect)); }
+  const sx = core.clamp(p.x0 + p.n / 2 - sw / 2, 0, W - sw), sy = core.clamp(p.y0 + p.hRows / 2 - sh / 2, 0, H - sh);
+  return { sx, sy, sw, sh };
+}
+
 function drawView() {
   const { dpr } = sizeCanvas(els.view, els.viewWrap, 2);
   const cv = els.view, ctx = viewCtx, cw = cv.width, ch = cv.height;
@@ -1136,14 +1159,18 @@ function drawView() {
   ctx.fillRect(0, 0, cw, ch);
   state.viewFit = null;
   if (!state.W || !state.fc) return;
-  const k = Math.min(cw / state.W, ch / state.H);
-  const dw = state.W * k, dh = state.H * k, dx = (cw - dw) / 2, dy = (ch - dh) / 2;
-  state.viewFit = { k: k / dpr, dx: dx / dpr, dy: dy / dpr };
+  const r = viewRect(cw, ch);
+  const k = Math.min(cw / r.sw, ch / r.sh);
+  const dw = r.sw * k, dh = r.sh * k, dx = (cw - dw) / 2, dy = (ch - dh) / 2;
+  state.viewFit = { k: k / dpr, dx: dx / dpr, dy: dy / dpr, rect: r };
   ctx.imageSmoothingEnabled = true;
-  ctx.drawImage(state.fc.c, dx, dy, dw, dh);
+  ctx.drawImage(state.fc.c, r.sx, r.sy, r.sw, r.sh, dx, dy, dw, dh);
   const p = state.profile;
   if (!p) return;
-  const x = dx + p.x0 * k, w = p.n * k, y = dy + p.y0 * k, h = Math.max(1, p.hRows * k);
+  ctx.save();
+  ctx.beginPath(); ctx.rect(dx, dy, dw, dh); ctx.clip();
+  const X = (fx) => dx + (fx - r.sx) * k, Y = (fy) => dy + (fy - r.sy) * k;
+  const x = X(p.x0), w = p.n * k, y = Y(p.y0), h = Math.max(1, p.hRows * k);
   // outline drawn just outside the band, dark under light so it shows on any picture
   for (const [color, lw] of [['rgba(0,0,0,0.7)', 3 * dpr], ['#ffffff', dpr]]) {
     ctx.strokeStyle = color; ctx.lineWidth = lw;
@@ -1152,17 +1179,18 @@ function drawView() {
   if (p.strips && p.strips.length) {
     ctx.setLineDash([4 * dpr, 3 * dpr]);
     ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = dpr;
-    for (const [sy, sh] of p.strips) ctx.strokeRect(x, dy + sy * k, w, sh * k);
+    for (const [sy, sh] of p.strips) ctx.strokeRect(x, Y(sy), w, sh * k);
     ctx.setLineDash([]);
   }
   if (state.cursorPx !== null) {
-    const cx = dx + (state.cursorPx + 0.5) * k;
+    const cx = X(state.cursorPx + 0.5);
     ctx.strokeStyle = '#ffffff'; ctx.lineWidth = dpr;
     ctx.beginPath();
     ctx.moveTo(cx, y - 12 * dpr); ctx.lineTo(cx, y - 3 * dpr);
     ctx.moveTo(cx, y + h + 3 * dpr); ctx.lineTo(cx, y + h + 12 * dpr);
     ctx.stroke();
   }
+  ctx.restore();
 }
 
 let colorCache = null;
@@ -1374,6 +1402,8 @@ function updateButtons() {
   els.btnFlip.setAttribute('aria-pressed', String(!!state.settings.flip));
   els.ovRotate.hidden = !state.W;
   els.ovBig.hidden = !on || state.big;
+  els.bigZoom.setAttribute('aria-pressed', String(!!state.settings.bigZoom));
+  els.bigZoom.textContent = state.settings.bigZoom ? 'Zoom out' : 'Zoom in';
 }
 
 function syncOutputs() {
@@ -1465,6 +1495,14 @@ function wire() {
   els.btnFlip.addEventListener('click', () => setSetting('flip', !state.settings.flip));
   els.bigCapture.addEventListener('click', toggleFreeze);
   els.bigFind.addEventListener('click', findSpectrum);
+  els.bigZoom.addEventListener('click', () => {
+    const on = !state.settings.bigZoom;
+    setSetting('bigZoom', on);
+    updateButtons();
+    const p = state.profile;
+    if (on && !p) toast('Find spectrum first: the zoom shows the band and the picture just around it.');
+    else if (on && p.n > 0.8 * state.W) toast('The band runs across nearly the whole picture, so there is little to zoom into. Find spectrum fits the band to the spectrum.');
+  });
   els.btnFind.addEventListener('click', findSpectrum);
   els.bigExit.addEventListener('click', () => setBig(false));
   els.ovBig.addEventListener('click', () => setBig(true));
@@ -1496,14 +1534,19 @@ function wire() {
   const moveBand = (e) => {
     const f = state.viewFit;
     if (!f) return;
-    const row = (local(e, els.view).y - f.dy) / f.k;
+    const row = (local(e, els.view).y - f.dy) / f.k + f.rect.sy;
     const v = core.clamp(Math.round(row / state.H * 1000) / 10, 0, 100);
     els.bandPos.value = v;
     setSetting('bandPos', v);
   };
+  const endDrag = () => {
+    dragging = false;
+    if (state.zoomHold) { state.zoomHold = null; requestRender(); }
+  };
   els.view.addEventListener('pointerdown', (e) => {
     if (!state.viewFit) return;
     dragging = true;
+    if (zoomed()) state.zoomHold = state.viewFit.rect;
     try { els.view.setPointerCapture(e.pointerId); } catch (err) { /* not capturable */ }
     if (state.settings.follow && isLive()) {
       setSetting('follow', false);
@@ -1514,8 +1557,8 @@ function wire() {
     e.preventDefault();
   });
   els.view.addEventListener('pointermove', (e) => { if (dragging) moveBand(e); });
-  els.view.addEventListener('pointerup', () => { dragging = false; });
-  els.view.addEventListener('pointercancel', () => { dragging = false; });
+  els.view.addEventListener('pointerup', endDrag);
+  els.view.addEventListener('pointercancel', endDrag);
 
   // touch the plot to place the cursor; it snaps when the finger lifts
   let plotting = false;

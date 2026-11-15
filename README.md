@@ -8,8 +8,9 @@ to an iPhone or Android home screen, where it also works offline.
 
 1. Open the page in Safari (iPhone) or Chrome (Android) and add it to the home screen.
 2. **Source**: start the camera, or load a photo of the spectrum. The camera opens in a
-   big view with large Capture, Find spectrum and rotate buttons; the band follows
-   the spectrum by itself until you place it by hand. Capture holds the frame; it can
+   big view with large Capture, Find spectrum, Zoom and rotate buttons; the band follows
+   the spectrum by itself until you place it by hand. Zoom in shows just the band and the
+   picture around it, as large as the screen allows. Capture holds the frame; it can
    still be rotated, flipped or tilted afterwards. Rotate or flip until the spectrum runs left
    to right with blue on the left. Tilt (up to 45 degrees either way) turns a slanted
    spectrum level. The screen and picture stay fixed when the phone turns.
@@ -22,7 +23,7 @@ to an iPhone or Android home screen, where it also works offline.
    **Label features** names what makes each line it finds: hydrogen, sodium, magnesium,
    iron, calcium and CH in the Sun, oxygen and water vapour in the air, or mercury,
    terbium and europium in a fluorescent lamp.
-   The Calibrate tab also plots the calibration: wavelength against pixel, how far it bends
+   Below that, the Calibrate tab plots the calibration: wavelength against pixel, how far it bends
    away from a straight line, and how many nm each pixel spans (two pixels are the finest
    detail that can show).
    For a light without lines (a white LED, a torch, a bulb), choose **Any white light, from
@@ -48,7 +49,9 @@ to an iPhone or Android home screen, where it also works offline.
   fitted to the lines you mark. "Shift to match" slides an existing calibration
   sideways using one known line, for when the phone has been remounted.
 - Automatic calibration from a fluorescent lamp matches the detected peaks to the
-  lamp's mercury, terbium and europium lines. From sunlight it matches the dark lines
+  lamp's mercury, terbium and europium lines. A rough calibration from the colours comes
+  first (see below), and matches that put the lines far from it are ruled out, as are
+  matches that put a bright line where no camera sees light. From sunlight it matches the dark lines
   against a stored reference sunlight spectrum (`js/solar.js`, from the public ASTM G173
   standard), then fits through the individual dark features. When two different matches
   fit about equally well, the colours decide: each wavelength has its own share of R, G

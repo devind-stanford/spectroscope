@@ -199,10 +199,11 @@ html[data-turn="-90"] .app { transform: translateX(100vw) rotate(90deg); }
 .app.big .plotWrap { height: calc(var(--app-h) * 0.15); min-height: 90px; }
 .app.big .bigBar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
   padding: 6px 0 8px;
 }
+.app.big .bigBar #bigZoom[aria-pressed="true"] { border-color: var(--mark); color: var(--mark); }
 .app.big .bigBar #bigCapture { grid-column: 1 / -1; min-height: 52px; font-size: 17px; }
 .app.big .bigBar .btn { min-height: 44px; padding: 0 4px; font-size: 14px; }
 

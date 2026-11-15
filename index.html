@@ -61,6 +61,7 @@
     <div class="bigBar" id="bigBar">
       <button type="button" class="btn primary" id="bigCapture">Capture</button>
       <button type="button" class="btn" id="bigFind">Find spectrum</button>
+      <button type="button" class="btn" id="bigZoom" aria-pressed="false">Zoom in</button>
       <button type="button" class="btn" id="bigRotate">&#10227; 90&deg;</button>
       <button type="button" class="btn" id="bigExit">Controls</button>
     </div>
@@ -169,10 +170,6 @@
 
     <div class="panel" data-panel="calibrate" role="tabpanel" hidden>
       <p class="fit" id="fitSummary">No lines marked yet.</p>
-      <div class="calPlotWrap" id="calPlotWrap" hidden>
-        <canvas id="calPlot" aria-label="The calibration: wavelength, departure from a straight line, and nanometres per pixel, against pixel column"></canvas>
-      </div>
-      <p class="note" id="calPlotNote" hidden></p>
       <h2>Automatic</h2>
       <div class="row field">
         <label for="autoSource">Light</label>
@@ -201,6 +198,11 @@
       <h2 id="featureHead" hidden>Features labelled on the plot</h2>
       <ul class="features" id="featureList" hidden></ul>
       <p class="note" id="featureNote" hidden></p>
+      <h2 id="calPlotHead" hidden>The calibration</h2>
+      <div class="calPlotWrap" id="calPlotWrap" hidden>
+        <canvas id="calPlot" aria-label="The calibration: wavelength, departure from a straight line, and nanometres per pixel, against pixel column"></canvas>
+      </div>
+      <p class="note" id="calPlotNote" hidden></p>
       <h2>By hand</h2>
       <ol class="steps">
         <li>Tap the plot on a line you recognise. Use the arrows under the plot for single pixels.</li>

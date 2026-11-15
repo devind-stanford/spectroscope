@@ -9,7 +9,7 @@
 //   - Polynomial coefficients are stored highest power first:
 //     wavelength_nm = c[0] * offset^2 + c[1] * offset + c[2]   (or c[0] * offset + c[1]).
 
-export const VERSION = '0.5.0';
+export const VERSION = '0.6.0';
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -531,15 +531,20 @@ export const LINE_GROUPS = [
 
 /** Lines a fluorescent tube or compact lamp shows at a few nm resolution. w weights how much a
  *  match counts; strong marks the lines nearly every lamp has. The green mercury line merges with
- *  terbium lines at 542-544 nm in tri-phosphor lamps. */
+ *  terbium lines at 542-544 nm in tri-phosphor lamps. fit: false marks a line that explains a peak
+ *  but whose position varies too much between lamps to calibrate with. */
 export const LAMP_LINES = [
   { nm: 404.7, w: 0.7, strong: false },
   { nm: 435.8, w: 1.0, strong: true },
   { nm: 487.7, w: 0.6, strong: false },
   { nm: 546.1, w: 1.0, strong: true },
   { nm: 578.0, w: 0.4, strong: false },
+  { nm: 587.5, w: 0.3, strong: false, fit: false },
   { nm: 611.6, w: 1.0, strong: true },
 ];
+
+/** Wavelengths (nm) a bright line can plausibly have: what any camera behind a spectroscope sees. */
+const LAMP_SEEN = [370, 740];
 
 /** Dark features of sunlight used to mark a sunlight calibration (placed where the fit puts them). */
 export const SUN_MARKS = [393.4, 430.8, 486.1, 517.3, 589.3, 656.3, 687.5, 760.8];
@@ -602,13 +607,33 @@ function fitMap(pairs) {
 }
 
 /** Calibrate from a fluorescent lamp: try every pair of detected peaks as every pair of lamp
- *  lines, keep the straight-line guess that explains the most peaks, then refine. When two
- *  different guesses explain the peaks about equally well, the colours decide (opts.rgb: the
- *  linear R, G, B profile; opts.colourRef: see colourJudge). */
+ *  lines, keep the straight-line guess that explains the most peaks, then refine. With the colours
+ *  (opts.rgb: the linear R, G, B profile; opts.colourRef: see colourJudge) a rough calibration from
+ *  the colours alone comes first, and guesses that put the lines far from it are ruled out; when
+ *  two different guesses still explain the peaks about equally well, the colours decide. */
 export function autoCalibrateLamp(y, x0, W, opts = {}) {
   const fail = (message, extra = {}) => ({ ok: false, points: [], message, warnings: [], reversed: false, ...extra });
   const { peaks } = lampPeaks(y);
   if (peaks.length < 3) return fail('Too few bright lines. Point the spectroscope at a fluorescent lamp (LED lights have no lines) and place the band on the spectrum.');
+
+  // A rough calibration from the colours: blue, green and red each have their own wavelengths.
+  let guide = null;
+  if (opts.rgb && opts.colourRef) {
+    const q = autoCalibrateColour(opts.rgb, x0, W, opts.colourRef);
+    if (q.ok) {
+      const d = q.debug;
+      guide = { at: (x) => d.lm + d.slope * (x - d.xm), a: d.first, b: d.last, tol: opts.colourRef.kind === 'model' ? 30 : 20 };
+    }
+  }
+  // typical distance (nm) between a guess and the colour calibration across the lit part
+  const offGuide = (map) => {
+    let acc = 0;
+    for (let k = 0; k <= 20; k++) { const x = guide.a + (guide.b - guide.a) * k / 20, d = map(x) - guide.at(x); acc += d * d; }
+    return Math.sqrt(acc / 21);
+  };
+  // every clear peak must fall where a camera can see light
+  const seen = (map) => peaks.every((p) => p.prom < 0.08 || (map(p.x) >= LAMP_SEEN[0] && map(p.x) <= LAMP_SEEN[1]));
+
   const hyps = [];
   for (let i = 0; i < peaks.length; i++) {
     for (let j = 0; j < peaks.length; j++) {
@@ -623,7 +648,7 @@ export function autoCalibrateLamp(y, x0, W, opts = {}) {
           const map = (x) => ni + s * (x - xi);
           const tol = Math.max(2.5, 3 * as);
           const m = matchLamp(peaks, map, tol);
-          if (m.length < 3) continue;
+          if (m.length < 3 || !seen(map)) continue;
           hyps.push({ score: scoreLamp(peaks, m, map, tol), s, map, n: m.length });
         }
       }
@@ -631,21 +656,33 @@ export function autoCalibrateLamp(y, x0, W, opts = {}) {
   }
   if (!hyps.length) return fail('No set of peaks matches the lamp pattern. Check that the light is a fluorescent lamp and that the band covers the whole spectrum.');
   hyps.sort((p, q) => q.score - p.score);
-  let best = hyps[0];
+  // Rule out guesses far from the colour calibration. If none is near it, keep them all and warn.
+  let pool = hyps, guideNote = '', guideWarn = '';
+  if (guide) {
+    for (const h of hyps) h.off = h.s > 0 ? offGuide(h.map) : Infinity;
+    const agree = hyps.filter((h) => h.off <= guide.tol);
+    if (agree.length) {
+      if (agree[0] !== hyps[0]) guideNote = ' A match that fitted the lines slightly better put them where their colours say they cannot be, so the colours ruled it out.';
+      pool = agree;
+    } else if (hyps[0].s > 0) {
+      guideWarn = `No match of the lamp lines agrees with the colours (the closest puts the spectrum about ${Math.min(...hyps.map((h) => h.off)).toFixed(0)} nm from where the colours put it). Check the marked lines against the plot, or mark the lines by hand.`;
+    }
+  }
+  let best = pool[0];
   const xmid = 0.5 * (peaks[0].x + peaks[peaks.length - 1].x);
   const distinct = (h, b) => Math.abs(h.map(xmid) - b.map(xmid)) > 8 || Math.abs(h.s / b.s - 1) > 0.06;
-  const rival = hyps.find((h) => distinct(h, best));
+  const rival = pool.find((h) => distinct(h, best));
   let colourNote = '', colourMis = null;
   const judge = colourJudge(opts.rgb, opts.colourRef);
+  const free = freeMismatch(opts.colourRef);
   if (rival && rival.score > 0.92 * best.score && rival.n >= best.n) {
     // a tie: each line has its own colour, so the colours tell which guess is right
     const near = [];
-    for (const h of hyps) {
+    for (const h of pool) {
       if (h.score < 0.92 * best.score || near.length >= 4) break;
       if (near.every((q) => distinct(h, q))) near.push(h);
     }
     const ranked = judge ? near.map((h) => ({ h, mis: judge(h.map) })).filter((q) => q.mis !== null).sort((p, q) => p.mis - q.mis) : [];
-    const free = freeMismatch(opts.colourRef);
     if (ranked.length >= 2 && ranked[0].mis <= 1.5 * free && ranked[1].mis > Math.max(free, ranked[0].mis + 0.05)) {
       best = ranked[0].h;
       colourMis = ranked[0].mis;
@@ -658,9 +695,10 @@ export function autoCalibrateLamp(y, x0, W, opts = {}) {
 
   // refine: fit through the matched lines, match again with a tighter tolerance, repeat
   let map = best.map, matches = [];
+  const fitted = (ms) => ms.filter((m) => LAMP_LINES[m.li].fit !== false);
   for (let it = 0; it < 3; it++) {
     const tol = Math.max(1.5, 2 * Math.abs(best.s));
-    matches = matchLamp(peaks, map, it === 0 ? Math.max(2.5, 3 * Math.abs(best.s)) : tol);
+    matches = fitted(matchLamp(peaks, map, it === 0 ? Math.max(2.5, 3 * Math.abs(best.s)) : tol));
     const f = fitMap(matches.map((m) => ({ x: peaks[m.pi].x, nm: LAMP_LINES[m.li].nm })));
     if (!f) break;
     map = f;
@@ -672,12 +710,15 @@ export function autoCalibrateLamp(y, x0, W, opts = {}) {
   }
   const warnings = [];
   if (matches.length === 3) warnings.push('Only three lamp lines were found, so the fit is a straight line. Check the marked lines against the plot.');
+  if (guideWarn) warnings.push(guideWarn);
   if (judge && colourMis === null) colourMis = judge(map);
+  if (!guideWarn && colourMis !== null && colourMis > 2 * free) warnings.push('The colours fit this calibration poorly, so it may be wrong. Check the marked lines against the plot.');
   return {
     ok: true, reversed: false, warnings,
     points: matches.map((m) => ({ off: x0 + peaks[m.pi].x - W / 2, nm: LAMP_LINES[m.li].nm, src: 'lamp' })),
-    lines: matches.length, colourMismatch: colourMis, coloursDecided: !!colourNote,
-    message: `Found ${matches.length} lamp lines: ${nms.map((v) => v.toFixed(1)).join(', ')} nm.${colourNote}`,
+    lines: matches.length, colourMismatch: colourMis, coloursDecided: !!(colourNote || guideNote),
+    debug: { guideOff: guide ? offGuide(map) : null, guideTol: guide ? guide.tol : null, peaks: peaks.length, hyps: hyps.length, pool: pool.length },
+    message: `Found ${matches.length} lamp lines: ${nms.map((v) => v.toFixed(1)).join(', ')} nm.${colourNote}${guideNote}`,
   };
 }
 
