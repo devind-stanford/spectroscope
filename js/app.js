@@ -598,8 +598,11 @@ function renderCalibration() {
   let text = cal.message;
   if (cal.ok) {
     const slope = Math.abs(cal.coeffs[cal.coeffs.length - 2]);
+    // the range across the sampling band, not the whole frame: far outside the marked lines the fit means nothing
+    const q = state.W ? bandRect() : { xa: 0, n: 1 };
+    const na = pxToNm(q.xa), nb = pxToNm(q.xa + q.n - 1);
     text = `${cal.degree === 2 ? 'Curved' : 'Straight-line'} fit through ${cal.n} lines: ${slope.toFixed(3)} nm per pixel at the centre, ` +
-      `${pxToNm(0).toFixed(0)} to ${pxToNm(state.W - 1).toFixed(0)} nm across the frame.`;
+      `${Math.min(na, nb).toFixed(0)} to ${Math.max(na, nb).toFixed(0)} nm across the band.`;
     if (cal.n > cal.degree + 1) text += ` Typical miss ${cal.rms.toFixed(2)} nm.`;
   }
   for (const w of cal.warnings) text += ' ' + w;
@@ -971,7 +974,7 @@ function setSetting(key, value) {
   s[key] = value;
   if (key === 'x0' && s.x1 < s.x0 + 5) { s.x1 = Math.min(100, s.x0 + 5); els.x1.value = s.x1; }
   if (key === 'x1' && s.x0 > s.x1 - 5) { s.x0 = Math.max(0, s.x1 - 5); els.x0.value = s.x0; }
-  if (key === 'x0' || key === 'x1') state.view = null;
+  if (key === 'x0' || key === 'x1') { state.view = null; renderCalibration(); }
   saveStore();
   syncOutputs();
   if (key === 'rot' || key === 'flip') { if (state.W) { configureFrame(); reprocess(); } updateButtons(); }
