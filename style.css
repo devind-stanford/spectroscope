@@ -136,10 +136,22 @@ html[data-turn="-90"] .app { transform: translateX(100vw) rotate(90deg); }
   pointer-events: none;
 }
 
-.viewBadge {
+/* the brightness label and the picture's buttons share the bottom edge: a long label wraps
+   instead of running under the buttons */
+.viewFoot {
   position: absolute;
   left: 6px;
+  right: 6px;
   bottom: 6px;
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  z-index: 3;
+  pointer-events: none;
+}
+.viewBadge {
+  flex: 0 1 auto;
+  min-width: 0;
   padding: 1px 7px;
   border-radius: 6px;
   background: rgba(0, 0, 0, 0.6);
@@ -168,12 +180,11 @@ html[data-turn="-90"] .app { transform: translateX(100vw) rotate(90deg); }
 }
 
 .viewTools {
-  position: absolute;
-  right: 6px;
-  bottom: 6px;
+  flex: none;
+  margin-left: auto;
   display: flex;
   gap: 6px;
-  z-index: 3;
+  pointer-events: auto;
 }
 .overlayBtn {
   min-height: 34px;
@@ -186,6 +197,7 @@ html[data-turn="-90"] .app { transform: translateX(100vw) rotate(90deg); }
   font-size: 13px;
 }
 .overlayBtn:active { background: rgba(60, 60, 60, 0.8); }
+.overlayBtn[aria-pressed="true"] { border-color: #9085e9; color: #b4acf3; }   /* the dark theme's mark, on the dark button */
 
 .bigBar { display: none; }
 

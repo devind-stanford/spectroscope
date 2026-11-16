@@ -9,8 +9,9 @@ to an iPhone or Android home screen, where it also works offline.
 1. Open the page in Safari (iPhone) or Chrome (Android) and add it to the home screen.
 2. **Source**: start the camera, or load a photo of the spectrum. The camera opens in a
    big view with large Capture, Find spectrum, Zoom and rotate buttons; the band follows
-   the spectrum by itself until you place it by hand. Zoom in shows just the band and the
-   picture around it, as large as the screen allows. Capture holds the frame; it can
+   the spectrum by itself until you place it by hand. Zoom in (in the big view, or on the
+   picture in the normal view) shows just the band and the picture around it, as large as
+   the screen allows. Capture holds the frame; it can
    still be rotated, flipped or tilted afterwards. Rotate or flip until the spectrum runs left
    to right with blue on the left. Tilt (up to 45 degrees either way) turns a slanted
    spectrum level. The screen and picture stay fixed when the phone turns.

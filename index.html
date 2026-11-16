@@ -31,10 +31,13 @@
       <canvas id="view" aria-label="Camera image with the sampling band marked"></canvas>
       <p id="viewHint" class="viewHint">Start the camera or load a photo. The band finds the spectrum by itself, or drag on the picture to place it.</p>
       <div id="notices" class="notices" aria-live="polite"></div>
-      <span id="viewBadge" class="viewBadge" hidden></span>
-      <div class="viewTools">
-        <button type="button" class="overlayBtn" id="ovRotate" aria-label="Rotate the picture 90 degrees" hidden>&#10227; 90&deg;</button>
-        <button type="button" class="overlayBtn" id="ovBig" aria-label="Big camera view" hidden>Big view</button>
+      <div class="viewFoot">
+        <span id="viewBadge" class="viewBadge" hidden></span>
+        <div class="viewTools">
+          <button type="button" class="overlayBtn" id="ovZoom" aria-pressed="false" aria-label="Zoom in on the spectrum" hidden>Zoom in</button>
+          <button type="button" class="overlayBtn" id="ovRotate" aria-label="Rotate the picture 90 degrees" hidden>&#10227; 90&deg;</button>
+          <button type="button" class="overlayBtn" id="ovBig" aria-label="Big camera view" hidden>Big view</button>
+        </div>
       </div>
     </div>
 

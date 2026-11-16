@@ -38,7 +38,7 @@ const els = {};
   'name', 'btnSaveAll', 'btnSaveCsv', 'btnSavePlot', 'btnSaveFrame', 'saveStatus',
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
-  'ovRotate', 'ovBig', 'bigBar', 'bigCapture', 'bigFind', 'bigZoom', 'bigRotate', 'bigExit',
+  'ovZoom', 'ovRotate', 'ovBig', 'bigBar','bigCapture', 'bigFind', 'bigZoom', 'bigRotate', 'bigExit',
   'btnBig', 'btnFind', 'bigOnStart', 'keepFixed', 'follow',
 ].forEach((id) => { els[id] = $(id); });
 const appEl = document.querySelector('.app');
@@ -1129,9 +1129,10 @@ function sizeCanvas(cv, wrap, maxDpr) {
   return { cssW: r.width, cssH: r.height, dpr };
 }
 
-/** Is the big view zoomed onto the spectrum? */
+/** Is the picture zoomed onto the spectrum? One setting (bigZoom, its name from when only the big
+ *  view had it) serves the normal and the big view. */
 function zoomed() {
-  return state.big && !!state.settings.bigZoom && !!state.profile;
+  return !!state.settings.bigZoom && !!state.profile;
 }
 
 /** The part of the analysed frame the picture shows: all of it, or (zoomed) the band's length with
@@ -1402,8 +1403,12 @@ function updateButtons() {
   els.btnFlip.setAttribute('aria-pressed', String(!!state.settings.flip));
   els.ovRotate.hidden = !state.W;
   els.ovBig.hidden = !on || state.big;
-  els.bigZoom.setAttribute('aria-pressed', String(!!state.settings.bigZoom));
-  els.bigZoom.textContent = state.settings.bigZoom ? 'Zoom out' : 'Zoom in';
+  els.ovZoom.hidden = !state.W || state.big;
+  for (const b of [els.bigZoom, els.ovZoom]) {
+    b.setAttribute('aria-pressed', String(!!state.settings.bigZoom));
+    b.textContent = state.settings.bigZoom ? 'Zoom out' : 'Zoom in';
+  }
+  els.ovZoom.setAttribute('aria-label', state.settings.bigZoom ? 'Show the whole picture' : 'Zoom in on the spectrum');
 }
 
 function syncOutputs() {
@@ -1495,14 +1500,16 @@ function wire() {
   els.btnFlip.addEventListener('click', () => setSetting('flip', !state.settings.flip));
   els.bigCapture.addEventListener('click', toggleFreeze);
   els.bigFind.addEventListener('click', findSpectrum);
-  els.bigZoom.addEventListener('click', () => {
+  const toggleZoom = () => {
     const on = !state.settings.bigZoom;
     setSetting('bigZoom', on);
     updateButtons();
     const p = state.profile;
     if (on && !p) toast('Find spectrum first: the zoom shows the band and the picture just around it.');
     else if (on && p.n > 0.8 * state.W) toast('The band runs across nearly the whole picture, so there is little to zoom into. Find spectrum fits the band to the spectrum.');
-  });
+  };
+  els.bigZoom.addEventListener('click', toggleZoom);
+  els.ovZoom.addEventListener('click', toggleZoom);
   els.btnFind.addEventListener('click', findSpectrum);
   els.bigExit.addEventListener('click', () => setBig(false));
   els.ovBig.addEventListener('click', () => setBig(true));
