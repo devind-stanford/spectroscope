@@ -89,13 +89,14 @@
         <button type="button" class="btn" id="btnBig" disabled>Big camera view</button>
         <button type="button" class="btn" id="btnFind">Find spectrum</button>
       </div>
-      <p class="note">Find spectrum places the band on the spectrum and turns the picture (Tilt) so the spectrum runs straight across.</p>
+      <p class="note">Find spectrum places the band on the spectrum and turns the picture (Tilt) so the spectrum runs straight across. While the camera is live this also happens by itself, until you place the band, set Tilt or turn the picture by hand.</p>
       <label class="check"><input type="checkbox" id="bigOnStart"> Open the camera in big view</label>
       <label class="check"><input type="checkbox" id="keepFixed"> Keep the screen and picture fixed when the phone turns</label>
       <div class="row field" id="cameraRow" hidden>
         <label for="cameraSelect">Camera</label>
         <select id="cameraSelect"></select>
       </div>
+      <p class="note warnNote" id="lensNote" hidden></p>
       <div class="row field">
         <label for="resolution">Video size</label>
         <select id="resolution">
@@ -158,6 +159,7 @@
         <output id="x1Out" for="x1"></output>
       </div>
       <label class="check"><input type="checkbox" id="follow"> Keep the band on the spectrum while the camera is live</label>
+      <label class="check"><input type="checkbox" id="autoLevel"> &hellip;and keep the spectrum level (turns the picture and sets Tilt)</label>
       <label class="check"><input type="checkbox" id="linearise"> Undo the camera's brightness curve (sRGB gamma)</label>
       <label class="check"><input type="checkbox" id="subtractBg"> Subtract stray light, measured above and below the spectrum</label>
       <label class="check"><input type="checkbox" id="normalise"> Scale the plot so the tallest point is 1</label>

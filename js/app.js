@@ -20,12 +20,16 @@ const DEFAULTS = {
   gWeight: 1, average: 4, resolution: '1080',
   showSum: true, showR: true, showG: true, showB: true,
   snap: 'peak', refLines: 'none', cameraLabel: '', name: 'spectrum', autoSource: 'lamp', colourWb: 'd65',
-  follow: true, bigOnStart: true, keepFixed: true, labelFeatures: false, bigZoom: false,
+  follow: true, autoLevel: true, bigOnStart: true, keepFixed: true, labelFeatures: false, bigZoom: false,
 };
 const LABEL_KINDS = { lamp: 'lamp', sun: 'sun' };   // which lights have lines to label
 const AUTO_SOURCES = ['lamp', 'sun', 'colour'];
 const FIND_EVERY_MS = 500;     // how often the live view looks for the spectrum when following it
 const NOTICE_MS = 6000;        // how long warnings stay on the picture after a capture
+// A web page cannot set the focus on an iPhone (Safari offers no focus control), so the one thing
+// to watch for is a lens that cannot focus near enough: the telephoto lenses focus no nearer than
+// about 1 m on recent iPhones, and a spectroscope's slit is usually much nearer than that.
+const TELE_NOTE = 'This is the telephoto lens, which cannot focus on anything nearer than roughly half a metre to a metre (depending on the iPhone), so a spectroscope\'s slit closer than that looks blurred. For a sharp spectrum choose Back Camera (the main lens) under Camera.';
 
 const $ = (id) => document.getElementById(id);
 const els = {};
@@ -39,7 +43,7 @@ const els = {};
   'btnDiagRefresh', 'btnDiagCopy', 'diag', 'btnResetSettings', 'btnResetCals', 'version',
   'nudgeL', 'nudgeR', 'zoomIn', 'zoomOut', 'zoomFull', 'toast', 'video', 'file',
   'ovZoom', 'ovRotate', 'ovBig', 'bigBar','bigCapture', 'bigFind', 'bigZoom', 'bigRotate', 'bigExit',
-  'btnBig', 'btnFind', 'bigOnStart', 'keepFixed', 'follow',
+  'btnBig', 'btnFind', 'bigOnStart', 'keepFixed', 'follow', 'autoLevel', 'lensNote',
 ].forEach((id) => { els[id] = $(id); });
 const appEl = document.querySelector('.app');
 
@@ -78,7 +82,8 @@ const state = {
   holdComp: 0,         // the same, for the captured frame
   rotatesWithScreen: null,   // does this browser turn camera frames when the screen turns? (learnt)
   big: false, lastFind: 0, findState: '', noticesUntil: 0, noticeTimer: 0,
-  features: [],        // labelled features of the current spectrum: [{ px, nm, tag, lines }]
+  lv: freshLevel(),    // the live levelling's memory (see autoLevelLive)
+  features: [],       // labelled features of the current spectrum: [{ px, nm, tag, lines }]
   featureKey: '',
 };
 
@@ -284,39 +289,117 @@ function applyBox(box, gentle) {
   return changed;
 }
 
+/** Level the picture for a found band. An upright spectrum is turned a quarter turn, after taking off
+ *  any tilt (which may be what stood it up). A slanted one is then levelled with the tilt, twice,
+ *  since the first turn brings more of the band into view. Returns the band found last, how far the
+ *  tilt changed and whether the picture was turned a quarter turn. */
+function levelPicture(box, minAngle) {
+  const s = state.settings;
+  let turned = 0, rotated = false;
+  if (box && box.vertical && s.tilt !== 0) {
+    turned -= s.tilt;
+    els.tilt.value = 0;
+    setSetting('tilt', 0);
+    drawFrame();
+    box = detectBand();
+  }
+  if (box && box.vertical) {
+    setSetting('rot', (s.rot + 90) % 360);
+    rotated = true;
+    drawFrame();
+    box = detectBand();
+    // of the two quarter turns, take the one that puts blue on the left
+    if (box && !box.vertical && box.order < -0.2) {
+      setSetting('rot', (s.rot + 180) % 360);
+      drawFrame();
+      box = detectBand();
+    }
+  }
+  // A mirrored frame turns the other way (see drawFrame), so the correction changes sign with Flip.
+  for (let k = 0; k < 2 && box && !box.vertical && box.angle !== null && Math.abs(box.angle) > minAngle; k++) {
+    const next = core.clamp(Math.round((s.tilt + (s.flip ? box.angle : -box.angle)) * 10) / 10, -45, 45);
+    if (next === s.tilt) break;
+    turned += next - s.tilt;
+    els.tilt.value = next;
+    setSetting('tilt', next);
+    drawFrame();
+    box = detectBand();
+  }
+  return { box, turned, rotated };
+}
+
+function levelMessage(start, turned, rotated) {
+  const parts = [];
+  if (rotated) parts.push('turned the picture a quarter turn');
+  if (Math.abs(turned) >= 0.1) parts.push(`levelled it (Tilt ${state.settings.tilt.toFixed(1)}°)`);
+  return parts.length ? `${start}: ${parts.join(' and ')}.` : `${start}.`;
+}
+
+/** The live levelling's memory: looks in a row that wanted a turn or a new tilt, when it last turned
+ *  the picture, whether the picture has been levelled once, and whether turning was given up. */
+function freshLevel() {
+  return { vert: 0, slant: 0, lastTurn: -1e9, done: false, noTurn: false };
+}
+
+/** While the band follows the live spectrum, the picture is levelled too, until Tilt is set or the
+ *  picture is turned by hand. The first time, any slant over 0.3° is levelled at once. After that
+ *  (or when this orientation is already calibrated, which a new tilt would move slightly) only a
+ *  slant over 1° that stays for three looks in a row, as after the phone is put back in its holder.
+ *  An upright spectrum is turned a quarter turn once it shows twice in a row; if it shows upright
+ *  again within 10 s of such a turn, turning is given up (the badge then asks for ⟳ 90°).
+ *  Returns levelPicture's result when it changed the picture, otherwise null. */
+function autoLevelLive(box, t) {
+  const s = state.settings, a = state.lv;
+  if (!s.autoLevel || !box) { a.vert = 0; a.slant = 0; return null; }
+  if (box.vertical) {
+    a.slant = 0;
+    if (a.noTurn || ++a.vert < 2) return null;
+    if (t - a.lastTurn < 10000) { a.noTurn = true; return null; }
+  } else {
+    a.vert = 0;
+    if (box.angle === null) { a.slant = 0; return null; }
+    const settled = a.done || calOk();
+    if (Math.abs(box.angle) <= (settled ? 1 : 0.3)) { a.slant = 0; a.done = true; return null; }
+    if (settled && ++a.slant < 3) return null;
+  }
+  a.vert = 0; a.slant = 0;
+  const res = levelPicture(box, 0.3);
+  a.done = true;
+  if (res.rotated) a.lastTurn = t;
+  if (!res.rotated && Math.abs(res.turned) < 0.1) return null;
+  toast(levelMessage('Spectrum found', res.turned, res.rotated) + ' Setting Tilt or turning the picture by hand stops this.', 4000);
+  return res;
+}
+
+/** Tilt set or the picture turned by hand while using the camera: stop levelling it by itself. */
+function levelledByHand() {
+  if (state.kind !== 'live' || !state.settings.autoLevel) return;
+  setSetting('autoLevel', false);
+  els.autoLevel.checked = false;
+  toast('Set by hand, so the picture is no longer levelled by itself. Find spectrum turns that back on.');
+}
+
 /** One-shot search (button): turns the picture if the spectrum runs up and down, levels it with
- *  the tilt so it runs straight across, then places the band. */
+ *  the tilt so it runs straight across, then places the band. While live, the band and the
+ *  levelling then follow the spectrum again. */
 function findSpectrum() {
   if (!state.W) { toast('Start the camera or load a photo first.'); return; }
   try {
     if (!isLive()) drawFrame();
-    let box = detectBand();
-    if (box && box.vertical) {
-      setSetting('rot', (state.settings.rot + 90) % 360);
-      drawFrame();
-      box = detectBand();
-    }
-    // A mirrored frame turns the other way (see drawFrame), so the correction changes sign with Flip.
-    // Twice, since the first turn brings more of the band into view.
-    let turned = 0;
-    for (let k = 0; k < 2 && box && !box.vertical && box.angle !== null && Math.abs(box.angle) > 0.3; k++) {
-      const s = state.settings;
-      const next = core.clamp(Math.round((s.tilt + (s.flip ? box.angle : -box.angle)) * 10) / 10, -45, 45);
-      if (next === s.tilt) break;
-      turned += next - s.tilt;
-      els.tilt.value = next;
-      setSetting('tilt', next);
-      drawFrame();
-      box = detectBand();
-    }
+    const { box, turned, rotated } = levelPicture(detectBand(), 0.3);
     if (!box || box.vertical) {
       toast('No spectrum found. Point the spectroscope at a light and check that the rainbow is in the picture.');
       return;
     }
     applyBox(box, false);
-    if (isLive()) { setSetting('follow', true); els.follow.checked = true; }
+    if (isLive()) {
+      setSetting('follow', true); els.follow.checked = true;
+      setSetting('autoLevel', true); els.autoLevel.checked = true;
+      state.lv = freshLevel();
+      state.lv.done = true;
+    }
     reprocess();
-    toast(Math.abs(turned) >= 0.1 ? `Band placed on the spectrum; the picture was turned ${Math.abs(turned).toFixed(1)}° to level it (Tilt ${state.settings.tilt.toFixed(1)}°).` : 'Band placed on the spectrum.', 4500);
+    toast(levelMessage('Band placed on the spectrum', turned, rotated), 4500);
   } catch (e) { logError('find spectrum', e); }
 }
 
@@ -459,9 +542,11 @@ function liveLoop(t) {
         drawFrame();
         if (state.settings.follow && t - state.lastFind >= FIND_EVERY_MS) {
           state.lastFind = t;
-          const box = detectBand();
+          let box = detectBand();
+          const lv = autoLevelLive(box, t);
+          if (lv) box = lv.box;   // the picture was turned: the band goes straight to the new place
           state.findState = !box ? 'none' : box.vertical ? 'vertical' : 'found';
-          if (box && !box.vertical) applyBox(box, true);
+          if (box && !box.vertical) applyBox(box, !lv);
         }
         pushMeasurement(measure(t, false));
         state.frameCount++;
@@ -528,7 +613,7 @@ async function startCamera(deviceId, explicit) {
   els.video.srcObject = stream;
   try { await els.video.play(); } catch (e) { logError('video.play', e); }
   state.kind = 'live'; state.frozen = false; state.srcEl = els.video; state.p3 = false;
-  state.srcW = 0; state.srcH = 0; state.profile = null; state.avg = [];
+  state.srcW = 0; state.srcH = 0; state.profile = null; state.avg = []; state.lv = freshLevel();
   state.rotatesWithScreen = null; state.comp = 0; state.noticesUntil = 0;
   els.viewHint.hidden = true;
   await refreshCameraList();
@@ -543,6 +628,12 @@ async function startCamera(deviceId, explicit) {
   if (state.settings.bigOnStart) setBig(true);
   updateButtons();
   startLoop();
+  if (isTelephoto()) toast(TELE_NOTE, 9000);
+}
+
+/** Is the live camera a telephoto lens? See TELE_NOTE. */
+function isTelephoto() {
+  return state.kind === 'live' && /tele/i.test(state.trackLabel || '');
 }
 
 /** Show the warnings over the picture for a few seconds (after a capture or a photo). */
@@ -1333,7 +1424,7 @@ function updateStatus() {
   let badge = p ? `Peak ${Math.round(p.peakRaw / 2.55)}%${clipped ? ', too bright' : p.peakRaw < 40 ? ', dim' : ''}` : '';
   if (isLive() && state.settings.follow) {
     if (state.findState === 'none') badge = 'Looking for the spectrum' + (badge ? ` · ${badge}` : '');
-    else if (state.findState === 'vertical') badge = 'Spectrum is upright: tap ⟳ 90°';
+    else if (state.findState === 'vertical') badge = state.settings.autoLevel && !state.lv.noTurn ? 'Spectrum is upright: turning the picture' : 'Spectrum is upright: tap ⟳ 90°';
   }
   if (els.viewBadge.textContent !== badge) els.viewBadge.textContent = badge;
   els.viewBadge.hidden = !badge;
@@ -1404,6 +1495,9 @@ function updateButtons() {
   els.ovRotate.hidden = !state.W;
   els.ovBig.hidden = !on || state.big;
   els.ovZoom.hidden = !state.W || state.big;
+  const tele = on && isTelephoto();
+  els.lensNote.hidden = !tele;
+  if (tele) els.lensNote.textContent = TELE_NOTE;
   for (const b of [els.bigZoom, els.ovZoom]) {
     b.setAttribute('aria-pressed', String(!!state.settings.bigZoom));
     b.textContent = state.settings.bigZoom ? 'Zoom out' : 'Zoom in';
@@ -1434,7 +1528,7 @@ function syncControls() {
   els.btnLabels.setAttribute('aria-pressed', String(!!s.labelFeatures));
   state.featureKey = null;
   updateColourBox();
-  for (const id of ['follow', 'bigOnStart', 'keepFixed']) els[id].checked = !!s[id];
+  for (const id of ['follow', 'autoLevel', 'bigOnStart', 'keepFixed']) els[id].checked = !!s[id];
   els.name.value = s.name;
   document.querySelectorAll('.chip').forEach((c) => c.setAttribute('aria-pressed', String(!!s[c.dataset.series])));
   syncOutputs();
@@ -1458,7 +1552,10 @@ function setSetting(key, value) {
 }
 
 function bindRange(id) {
-  els[id].addEventListener('input', () => setSetting(id, Number(els[id].value)));
+  els[id].addEventListener('input', () => {
+    if (id === 'tilt') levelledByHand();
+    setSetting(id, Number(els[id].value));
+  });
 }
 
 function wire() {
@@ -1468,6 +1565,7 @@ function wire() {
     const step = Number(input.step) || 1;
     const v = core.clamp(Number(input.value) + Number(b.dataset.dir) * step, Number(input.min), Number(input.max));
     input.value = String(Math.round(v * 1000) / 1000);
+    if (b.dataset.for === 'tilt') levelledByHand();
     setSetting(b.dataset.for, Number(input.value));
   }));
   ['linearise', 'subtractBg', 'normalise', 'labelPeaks'].forEach((id) => els[id].addEventListener('change', () => setSetting(id, els[id].checked)));
@@ -1493,7 +1591,7 @@ function wire() {
     if (d) { state.settings.cameraLabel = d.label || ''; saveStore(); startCamera(d.deviceId, true); }
   });
   // Rotating works on a captured frame too: the capture keeps the untouched camera picture
-  const rotate90 = () => setSetting('rot', (state.settings.rot + 90) % 360);
+  const rotate90 = () => { levelledByHand(); setSetting('rot', (state.settings.rot + 90) % 360); };
   els.btnRotate.addEventListener('click', rotate90);
   els.ovRotate.addEventListener('click', rotate90);
   els.bigRotate.addEventListener('click', rotate90);
@@ -1515,6 +1613,7 @@ function wire() {
   els.ovBig.addEventListener('click', () => setBig(true));
   els.btnBig.addEventListener('click', () => setBig(true));
   els.follow.addEventListener('change', () => { setSetting('follow', els.follow.checked); state.findState = ''; });
+  els.autoLevel.addEventListener('change', () => { setSetting('autoLevel', els.autoLevel.checked); state.lv = freshLevel(); });
   els.bigOnStart.addEventListener('change', () => setSetting('bigOnStart', els.bigOnStart.checked));
   els.keepFixed.addEventListener('change', () => {
     setSetting('keepFixed', els.keepFixed.checked);
@@ -1839,6 +1938,7 @@ function diagnostics() {
       app_turned: document.documentElement.getAttribute('data-turn'), frames_turn_with_screen: state.rotatesWithScreen,
       live_compensation: state.comp, capture_compensation: state.holdComp },
     band_finder: state.findState,
+    levelling: { levelled_once: state.lv.done, turning_given_up: state.lv.noTurn },
     settings: state.settings,
     calibrations_saved: Object.keys(state.cals),
     colours_kept: Object.fromEntries(Object.entries(state.colourRefs).map(([k, v]) => [k, `${v.savedAt || '?'} from ${v.from || '?'}`])),

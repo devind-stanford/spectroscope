@@ -386,6 +386,7 @@ html[data-turn="-90"] .app { transform: translateX(100vw) rotate(90deg); }
 .check input { flex: none; width: 20px; height: 20px; margin: 0; accent-color: var(--accent); }
 
 .note { font-size: 13px; color: var(--ink2); margin: 0 0 10px; }
+.note.warnNote { color: var(--ink); background: var(--warn-wash); padding: 6px 8px; border-radius: 8px; }
 .fit { font-size: 14px; margin: 0 0 8px; }
 .steps { margin: 0 0 10px; padding-left: 20px; font-size: 13px; color: var(--ink2); }
 .steps li { margin-bottom: 3px; }

@@ -9,7 +9,7 @@
 //   - Polynomial coefficients are stored highest power first:
 //     wavelength_nm = c[0] * offset^2 + c[1] * offset + c[2]   (or c[0] * offset + c[1]).
 
-export const VERSION = '0.6.1';
+export const VERSION = '0.7.0';
 
 export function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
@@ -99,9 +99,9 @@ export function bandEdges(rows, centre) {
 /** Find the spectrum in a small RGBA copy of the frame (w x h pixels): the colourful band, which
  *  the white zero order and grey stray light are not. Returns null when nothing colourful stands
  *  out, { vertical: true } when the band runs up and down, or the band's box as fractions of the
- *  frame: { vertical: false, x0, x1, y0, y1, angle } (x1, y1 exclusive). angle is the slope of the
- *  band in degrees, positive when it runs down to the right, or null when the band is too short
- *  and wide to tell. */
+ *  frame: { vertical: false, x0, x1, y0, y1, angle, order } (x1, y1 exclusive). angle is the slope
+ *  of the band in degrees, positive when it runs down to the right, or null when the band is too
+ *  short and wide to tell. order is positive when blue is left of red (see the end). */
 export function findSpectrumBox(data, w, h) {
   const n = w * h, score = new Uint8Array(n), hist = new Uint32Array(256);
   for (let i = 0, p = 0; i < n; i++, p += 4) {
@@ -191,7 +191,19 @@ export function findSpectrumBox(data, w, h) {
   for (let x = xp - 1, miss = 0; x >= 0; x--) { if (on(x)) { xa = x; miss = 0; } else if (++miss > gap) break; }
   for (let x = xp + 1, miss = 0; x < w; x++) { if (on(x)) { xb = x; miss = 0; } else if (++miss > gap) break; }
   if (xb - xa < 4) return null;
-  return { vertical: false, x0: xa / w, x1: (xb + 1) / w, y0: y0 / h, y1: (y1 + 1) / h, angle };
+  // which way the colours run: where the bluest and the reddest light sit along the band, as a share
+  // of its length (positive when blue is on the left, the usual way round; 0 when it cannot tell)
+  let wb = 0, sb = 0, wr = 0, sr = 0;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = xa, p = 4 * (y * w + xa); x <= xb; x++, p += 4) {
+      const r = data[p], g = data[p + 1], b = data[p + 2];
+      const bl = b - Math.max(r, g), rd = r - Math.max(g, b);
+      if (bl > 0) { wb += bl; sb += bl * x; }
+      if (rd > 0) { wr += rd; sr += rd * x; }
+    }
+  }
+  const order = wb > 0 && wr > 0 ? (sr / wr - sb / wb) / (xb - xa + 1) : 0;
+  return { vertical: false, x0: xa / w, x1: (xb + 1) / w, y0: y0 / h, y1: (y1 + 1) / h, angle, order };
 }
 
 /** Gaussian blur of a 1-D array (edges repeat the end value). sigma in samples. */

@@ -17,7 +17,9 @@ to an iPhone or Android home screen, where it also works offline.
    spectrum level. The screen and picture stay fixed when the phone turns.
 3. **Band**: Find spectrum places the sampling band on the rainbow, turns the picture if the
    spectrum runs up and down, and sets the tilt so it runs straight across; you can also drag
-   on the picture. Each column inside the band is averaged to give the R, G, B and combined curves.
+   on the picture. While the camera is live this happens by itself: the band follows the
+   spectrum until you place it by hand, and the picture is turned and levelled until you set
+   Tilt or turn the picture by hand. Find spectrum turns both back on. Each column inside the band is averaged to give the R, G, B and combined curves.
 4. **Calibrate automatically**: point at a fluorescent lamp, or at blue sky or a white
    sheet in sunlight, cover the whole spectrum with the band, choose the light and tap
    **Auto-calibrate**. The lines it finds are listed and can be checked or edited.
@@ -83,6 +85,11 @@ storage. Files leave the device only through the share sheet or download you cho
 - The page shows whatever manual camera controls the browser offers. Many phones
   offer none; in that case take the photo in the camera app with exposure locked and
   load it.
+- Safari on iPhone gives web pages no control over focus, so the camera focuses by itself.
+  The telephoto lenses cannot focus nearer than roughly half a metre to a metre, which is
+  further than most spectroscope slits; the page warns when one is chosen. Use the main
+  lens (Back Camera), or for a fixed focus take the photo in the Camera app with focus
+  locked (press and hold on the picture) and load it.
 - The R, G and B curves are the camera's processed colour channels, not raw sensor data.
 
 ## Running it on a computer

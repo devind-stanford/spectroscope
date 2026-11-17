@@ -2,7 +2,7 @@
 // as the phone is online; the saved copy is used when the network is missing or slow.
 // Change CACHE whenever the list of files changes.
 
-const CACHE = 'spectroscope-0.6.1';
+const CACHE = 'spectroscope-0.7.0';
 const ASSETS = [
   './',
   'index.html',
